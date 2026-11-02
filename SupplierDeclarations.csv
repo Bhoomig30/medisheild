@@ -1,3 +1,0 @@
-declaration_id;tier1_supplier;material;upstream_name;upstream_region;share_percent;backup_available;lead_time_days;status;submitted_at
-D1;S1;Paracetamol API;Zhejiang API Works;Zhejiang;60;false;21;submitted;2026-11-02T00:00:00Z
-D2;S2;Paracetamol API;;;;;;requested;
