@@ -1,6 +1,0 @@
-supplier_id;name;tier;parent_id;material;region;country;simulated
-S1;Sharma Traders;1;;Paracetamol API;Mumbai;India;true
-S2;Deccan Pharma Chem;1;;Paracetamol API;Hyderabad;India;true
-S3;Zhejiang API Works;2;S1;Paracetamol API;Zhejiang;China;true
-S4;Gujarat Intermediates;2;S2;Paracetamol API;Gujarat;India;true
-S5;Jiangsu Raw Chemicals;3;S3;Raw chemical input;Jiangsu;China;true
