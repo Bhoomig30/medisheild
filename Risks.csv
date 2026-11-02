@@ -1,2 +1,0 @@
-risk_id;event;region;affected_supplier;tier;confidence;source;reason;evidence_type;matched_on
-RB1;Simulated delay notice: Deccan Pharma Chem says shipment delayed 10 days;Hyderabad;S2;1;high;Supplier email (simulated);Direct notice from Tier-1 supplier;declared;supplier name
