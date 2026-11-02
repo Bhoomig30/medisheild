@@ -1,0 +1,30 @@
+{
+  "name": "medisheild",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@sap/cds": "^10"
+  },
+  "devDependencies": {
+    "@cap-js/sqlite": "^3"
+  },
+  "scripts": {
+    "start": "cds-serve"
+  },
+  "cds": {
+    "requires": {
+      "db": {
+        "[development]": {
+          "model": ["db/schema.cds"]
+        },
+        "[production]": {
+          "model": [
+            "db/schema.cds",
+            "db/hana/identity.cds"
+          ]
+        }
+      }
+    }
+  },
+  "private": true
+}
