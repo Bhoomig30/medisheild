@@ -1,17 +1,30 @@
 {
-  "name": "p1-sensing",
+  "name": "medisheild",
   "version": "1.0.0",
-  "description": "MediShield P1 Sensing Agent (all data simulated)",
   "type": "module",
-  "scripts": {
-    "test": "node --test test/match.test.js",
-    "smoke": "node test/smoke.js",
-    "live": "node test/live.js"
-  },
   "dependencies": {
-    "dotenv": "^16.4.5"
+    "@sap/cds": "^10"
   },
-  "optionalDependencies": {
-    "@sap-ai-sdk/orchestration": "^1.0.0"
-  }
+  "devDependencies": {
+    "@cap-js/sqlite": "^3"
+  },
+  "scripts": {
+    "start": "cds-serve"
+  },
+  "cds": {
+    "requires": {
+      "db": {
+        "[development]": {
+          "model": ["db/schema.cds"]
+        },
+        "[production]": {
+          "model": [
+            "db/schema.cds",
+            "db/hana/identity.cds"
+          ]
+        }
+      }
+    }
+  },
+  "private": true
 }
