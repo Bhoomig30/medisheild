@@ -1,0 +1,4 @@
+[
+ {"declaration_id":"D1","tier1_supplier":"S1","material":"Paracetamol API","upstream_name":"Zhejiang API Works","upstream_region":"Zhejiang","share_percent":60,"backup_available":false,"lead_time_days":21,"status":"submitted"},
+ {"declaration_id":"D2","tier1_supplier":"S2","material":"Paracetamol API","upstream_name":null,"upstream_region":null,"share_percent":null,"backup_available":null,"lead_time_days":null,"status":"requested"}
+]

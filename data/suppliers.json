@@ -1,0 +1,7 @@
+[
+ {"supplier_id":"S1","name":"Sharma Traders","tier":1,"parent_id":null,"material":"Paracetamol API","region":"Mumbai"},
+ {"supplier_id":"S2","name":"Deccan Pharma Chem","tier":1,"parent_id":null,"material":"Paracetamol API","region":"Hyderabad"},
+ {"supplier_id":"S3","name":"Zhejiang API Works","tier":2,"parent_id":"S1","material":"Paracetamol API","region":"Zhejiang"},
+ {"supplier_id":"S4","name":"Gujarat Intermediates","tier":2,"parent_id":"S2","material":"Paracetamol API","region":"Gujarat"},
+ {"supplier_id":"S5","name":"Jiangsu Raw Chemicals","tier":3,"parent_id":"S3","material":"Raw chemical input","region":"Jiangsu"}
+]

@@ -1,0 +1,17 @@
+[
+ {"id":"s1","source":"News (simulated)","text":"Ningbo-Zhoushan port in Zhejiang province has suspended operations for 7 days due to a typhoon, halting API exports.",
+  "facts":{"is_disruption":true,"event":"Port closure in Zhejiang for 7 days","region":"Zhejiang","supplier_name":null,"material_hint":"API","delay_days":7},
+  "expected":{"tier":2,"affected_supplier":"S3","confidence":"high","evidence_type":"declared"}},
+ {"id":"s2","source":"Supplier email (simulated)","text":"From Deccan Pharma Chem: our Paracetamol API shipment is delayed by 10 days due to reactor maintenance.",
+  "facts":{"is_disruption":true,"event":"Deccan Pharma Chem shipment delayed 10 days","region":"Hyderabad","supplier_name":"Deccan Pharma Chem","material_hint":"Paracetamol API","delay_days":10},
+  "expected":{"tier":1,"affected_supplier":"S2","confidence":"high","evidence_type":"news"}},
+ {"id":"s3","source":"Tariff news (simulated)","text":"China announces export curbs on certain raw chemical inputs from Jiangsu province, effective next month.",
+  "facts":{"is_disruption":true,"event":"Export curbs on raw chemical inputs from Jiangsu","region":"Jiangsu","supplier_name":null,"material_hint":"raw chemicals","delay_days":null},
+  "expected":{"tier":3,"affected_supplier":"S5","confidence":"medium","evidence_type":"inferred"}},
+ {"id":"s4","source":"News (simulated)","text":"Heavy flooding in the Gujarat industrial belt has halted intermediate plants for several days.",
+  "facts":{"is_disruption":true,"event":"Flooding halts plants in Gujarat","region":"Gujarat","supplier_name":null,"material_hint":"intermediates","delay_days":null},
+  "expected":{"tier":2,"affected_supplier":"S4","confidence":"low","evidence_type":"inferred"}},
+ {"id":"s5","source":"News (simulated)","text":"Local tomato prices rise in Kolar market this week.",
+  "facts":{"is_disruption":false,"event":null,"region":null,"supplier_name":null,"material_hint":null,"delay_days":null},
+  "expected":null}
+]

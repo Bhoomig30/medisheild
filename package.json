@@ -1,0 +1,17 @@
+{
+  "name": "p1-sensing",
+  "version": "1.0.0",
+  "description": "MediShield P1 Sensing Agent (all data simulated)",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/match.test.js",
+    "smoke": "node test/smoke.js",
+    "live": "node test/live.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "optionalDependencies": {
+    "@sap-ai-sdk/orchestration": "^1.0.0"
+  }
+}
