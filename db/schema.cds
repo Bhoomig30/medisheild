@@ -64,6 +64,7 @@ entity Options {
       cost_estimate    : Decimal(12, 2);
       delay_saved_days : Integer;
       option_rank      : Integer;
+      approval_status  : String(20) default 'pending';
 }
 
 entity Messages {

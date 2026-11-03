@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# =====================================================================
+# MediShield P4 - regression tests (up to and including Batch 1)
+#
+# Run from the project root (the folder that contains package.json):
+#     bash test/p4-regression.sh
+#
+# - Starts its OWN server on port 4010 (your `cds watch` on 4004 is not touched).
+# - Every group starts a fresh in-memory SQLite database, so groups do not
+#   affect each other. Nothing is written to HANA or to P2's HACKFEST0368.
+# - Development test users (package.json): manager, owner, viewer (no password).
+# - "GAP" lines are known open issues scheduled for Batch 2. They are reported
+#   honestly but not counted as pass/fail.
+#
+# Exit code: 0 = all tests passed, 1 = at least one failure, 2 = server problem.
+# =====================================================================
+
+PORT="${PORT:-4010}"
+BASE="http://localhost:${PORT}/odata/v4/medi-shield"
+LOG="/tmp/p4-test-server.log"
+PASS=0
+FAIL=0
+FAILED_IDS=()
+SERVER_PID=""
+
+# ---------- server control -------------------------------------------
+
+port_in_use() { curl -s -o /dev/null "http://localhost:${PORT}/"; }
+
+stop_server() {
+  if [ -n "$SERVER_PID" ]; then
+    kill "$SERVER_PID" 2>/dev/null
+    wait "$SERVER_PID" 2>/dev/null
+    SERVER_PID=""
+  fi
+  # Wait until the port is really free, so the next group gets a fresh server
+  for _ in $(seq 1 40); do port_in_use || return 0; sleep 0.25; done
+  echo "ERROR: port $PORT is still in use by another process. Stop it and re-run."
+  exit 2
+}
+trap stop_server EXIT
+
+# start_server [extra cds-serve args...]   (fresh in-memory DB every time)
+start_server() {
+  stop_server
+  # Start cds-serve directly (not via npx) so that stopping it really stops the server
+  local serve=./node_modules/.bin/cds-serve
+  [ -x "$serve" ] || { echo "ERROR: $serve not found. Run 'npm install' first."; exit 2; }
+  "$serve" --port "$PORT" --in-memory "$@" > "$LOG" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 60); do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "ERROR: server exited during start-up. See $LOG"; exit 2
+    fi
+    if curl -s -o /dev/null "$BASE/\$metadata"; then return 0; fi
+    sleep 0.5
+  done
+  echo "ERROR: server did not start on port $PORT. See $LOG"
+  exit 2
+}
+
+# ---------- request helpers ------------------------------------------
+
+# call USER METHOD PATH [JSON]   USER = manager|owner|viewer|- (- = not logged in)
+call() {
+  local user="$1" method="$2" path="$3" data="${4:-}" out
+  local args=(-s -w $'\n%{http_code}' -X "$method")
+  [ "$user" != "-" ] && args+=(-u "${user}:")
+  [ -n "$data" ] && args+=(-H 'Content-Type: application/json' -d "$data")
+  out=$(curl "${args[@]}" "$BASE/$path")
+  STATUS="${out##*$'\n'}"
+  RESP="${out%$'\n'*}"
+}
+
+# check ID DESCRIPTION EXPECTED_STATUS [EXPECTED_TEXT ...]
+check() {
+  local id="$1" desc="$2" exp="$3"; shift 3
+  local ok=1 t
+  [ "$STATUS" = "$exp" ] || ok=0
+  for t in "$@"; do grep -qF -- "$t" <<< "$RESP" || ok=0; done
+  if [ $ok -eq 1 ]; then
+    PASS=$((PASS + 1)); printf 'PASS  %-5s %s\n' "$id" "$desc"
+  else
+    FAIL=$((FAIL + 1)); FAILED_IDS+=("$id")
+    printf 'FAIL  %-5s %s\n      expected: %s %s\n      got:      %s %s\n' \
+      "$id" "$desc" "$exp" "$*" "$STATUS" "${RESP:0:300}"
+  fi
+}
+
+# t ID DESCRIPTION USER METHOD PATH JSON EXPECTED_STATUS [EXPECTED_TEXT ...]
+t() {
+  local id="$1" desc="$2" user="$3" method="$4" path="$5" data="$6"; shift 6
+  call "$user" "$method" "$path" "$data"
+  check "$id" "$desc" "$@"
+}
+
+# count_is ID DESCRIPTION ENTITY_SET FILTER EXPECTED_NUMBER
+count_is() {
+  local id="$1" desc="$2" set="$3" filter="$4" exp="$5"
+  call - GET "${set}/\$count?\$filter=$(enc "$filter")"
+  if [ "$STATUS" = "200" ] && [ "$RESP" = "$exp" ]; then
+    PASS=$((PASS + 1)); printf 'PASS  %-5s %s\n' "$id" "$desc"
+  else
+    FAIL=$((FAIL + 1)); FAILED_IDS+=("$id")
+    printf 'FAIL  %-5s %s\n      expected: count %s\n      got:      HTTP %s, %s\n' \
+      "$id" "$desc" "$exp" "$STATUS" "${RESP:0:300}"
+  fi
+}
+
+# gap ID DESCRIPTION USER METHOD PATH JSON INSECURE_STATUS   (not counted)
+gap() {
+  local id="$1" desc="$2" user="$3" method="$4" path="$5" data="$6" bad="$7"
+  call "$user" "$method" "$path" "$data"
+  if [ "$STATUS" = "$bad" ]; then
+    printf 'GAP   %-5s %s -> still OPEN (HTTP %s), fixed in Batch 2\n' "$id" "$desc" "$STATUS"
+  else
+    printf 'GAP   %-5s %s -> now blocked (HTTP %s)\n' "$id" "$desc" "$STATUS"
+  fi
+}
+
+# URL-encode spaces and quotes for $filter
+enc() { local s="${1// /%20}"; echo "${s//\'/%27}"; }
+
+# Fire the same request twice in parallel; sets PAR_CODES (sorted, e.g. "200 409")
+parallel_twice() {
+  local user="$1" path="$2" data="$3" f1 f2
+  f1=$(mktemp); f2=$(mktemp)
+  curl -s -o /dev/null -w '%{http_code}' -u "${user}:" -X POST -H 'Content-Type: application/json' -d "$data" "$BASE/$path" > "$f1" &
+  local p1=$!
+  curl -s -o /dev/null -w '%{http_code}' -u "${user}:" -X POST -H 'Content-Type: application/json' -d "$data" "$BASE/$path" > "$f2" &
+  local p2=$!
+  wait $p1 $p2
+  PAR_CODES=$(printf '%s\n%s\n' "$(cat "$f1")" "$(cat "$f2")" | sort | tr '\n' ' ' | sed 's/ $//')
+  rm -f "$f1" "$f2"
+}
+
+risk_json() { # risk_id supplier tier confidence evidence [event]
+  printf '{"risk":{"risk_id":"%s","event":"%s","region":"Zhejiang","affected_supplier":"%s","tier":%s,"confidence":"%s","source":"test","reason":"test","evidence_type":"%s","matched_on":"test"}}' \
+    "$1" "${6:-Port closure in Zhejiang (simulated)}" "$2" "$3" "$4" "$5"
+}
+
+# =====================================================================
+echo "== Group 1: option decisions, not logged in (previous regression) =="
+start_server
+t 1.01 "Approve TO1 (180k) as claimed manager"       - POST approveOption '{"option_id":"TO1","approver_role":"procurement_manager","approved_by":"Asha"}' 200 '"status":"approved"'
+t 1.02 "Approve TO1 again"                            - POST approveOption '{"option_id":"TO1","approver_role":"procurement_manager","approved_by":"Asha"}' 409 'already been approved'
+t 1.03 "Reject TO1 after approval"                    - POST rejectOption  '{"option_id":"TO1","approver_role":"plant_owner","approved_by":"Ravi","reason":"x"}' 409 'already been approved'
+t 1.04 "Edit TO1 after approval"                      - POST editOption    '{"option_id":"TO1","cost_estimate":999999,"approved_by":"Asha"}' 409 'Finalised options'
+t 1.05 "Approve TO2 (250k) as claimed manager"        - POST approveOption '{"option_id":"TO2","approver_role":"procurement_manager","approved_by":"Asha"}' 200 '"status":"pending_owner"' '"success":false'
+t 1.06 "Approve unknown option"                       - POST approveOption '{"option_id":"NOPE","approver_role":"plant_owner","approved_by":"x"}' 404 'not found'
+t 1.07 "Approve without role/name (not logged in)"    - POST approveOption '{"option_id":"TO2"}' 400
+t 1.08 "Reject without reason"                        - POST rejectOption  '{"option_id":"TO2","approver_role":"plant_owner","approved_by":"x"}' 400
+t 1.09 "Edit with negative cost"                      - POST editOption    '{"option_id":"TO2","cost_estimate":-5,"approved_by":"x"}' 400
+t 1.10 "Edit with no fields"                          - POST editOption    '{"option_id":"TO2","approved_by":"x"}' 400
+t 1.11 "Edit without editor name (not logged in)"     - POST editOption    '{"option_id":"TO2","cost_estimate":5}' 400
+call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and status eq 'approved'")"
+check 1.12 "Audit: unauthenticated approval recorded as anonymous, not 'Asha'" 200 '"approved_by":"anonymous"' '"approver_role":null'
+
+# =====================================================================
+echo "== Group 2: threshold bypass fix (escalation is permanent) =="
+start_server
+t 2.01 "Manager approves TO2 (250k)"                  manager POST approveOption '{"option_id":"TO2"}' 200 '"status":"pending_owner"'
+t 2.02 "Manager edits TO2 cost down to 199,999"       manager POST editOption '{"option_id":"TO2","cost_estimate":199999}' 200 'still requires plant-owner'
+t 2.03 "TO2 is still pending_owner at 199,999"        - GET "Options('TO2')" '' 200 '"approval_status":"pending_owner"' '"cost_estimate":"199999.00"'
+t 2.04 "Manager approves TO2 again"                   manager POST approveOption '{"option_id":"TO2"}' 200 '"status":"pending_owner"' '"success":false'
+count_is 2.05 "Only one pending_owner audit row for TO2" AuditLog "option_id eq 'TO2' and status eq 'pending_owner'" 1
+t 2.06 "Plant owner approves TO2"                     owner POST approveOption '{"option_id":"TO2"}' 200 '"status":"approved"'
+call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO2' and status eq 'approved'")"
+check 2.07 "Audit: approval by owner / plant_owner" 200 '"approved_by":"owner"' '"approver_role":"plant_owner"'
+t 2.08 "Manager raises TO1 to 300,000 (was 180k)"     manager POST editOption '{"option_id":"TO1","cost_estimate":300000}' 200 'updated successfully'
+t 2.09 "Manager lowers TO1 to 150,000 before approval" manager POST editOption '{"option_id":"TO1","cost_estimate":150000}' 200 'still requires plant-owner'
+t 2.10 "TO1 became pending_owner"                     - GET "Options('TO1')" '' 200 '"approval_status":"pending_owner"'
+t 2.11 "Manager approves TO1"                         manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"pending_owner"' '"success":false'
+t 2.12 "Manager rejects escalated TO1 (Decision A)"   manager POST rejectOption '{"option_id":"TO1","reason":"Too costly"}' 200 '"status":"rejected"'
+call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and action eq 'reject'")"
+check 2.13 "Audit: rejection by manager / procurement_manager" 200 '"approved_by":"manager"' '"approver_role":"procurement_manager"'
+
+start_server
+t 2.14 "Manager edits TO1 (never above threshold)"    manager POST editOption '{"option_id":"TO1","cost_estimate":170000}' 200 'updated successfully'
+t 2.15 "TO1 is pending"                               - GET "Options('TO1')" '' 200 '"approval_status":"pending"'
+t 2.16 "Manager approves TO1"                         manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"approved"'
+call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and action eq 'edit'")"
+check 2.17 "Audit: edit by manager / procurement_manager" 200 '"approved_by":"manager"' '"approver_role":"procurement_manager"'
+t 2.18 "Unauthenticated edit claiming 'Asha'"         - POST editOption '{"option_id":"TO2","cost_estimate":260000,"approved_by":"Asha"}' 200
+call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO2' and action eq 'edit'")"
+check 2.19 "Audit: recorded as anonymous / null role" 200 '"approved_by":"anonymous"' '"approver_role":null'
+count_is 2.20 "No audit row claims to be 'Asha'" AuditLog "approved_by eq 'Asha'" 0
+
+# =====================================================================
+echo "== Group 3: roles =="
+start_server
+t 3.01 "Viewer approves TO1"                          viewer POST approveOption '{"option_id":"TO1"}' 403
+t 3.02 "Viewer rejects TO1"                           viewer POST rejectOption  '{"option_id":"TO1","reason":"x"}' 403
+t 3.03 "Viewer edits TO1"                             viewer POST editOption    '{"option_id":"TO1","cost_estimate":1}' 403
+t 3.04 "Manager claims plant_owner in request (TO2)"  manager POST approveOption '{"option_id":"TO2","approver_role":"plant_owner","approved_by":"Ravi"}' 200 '"status":"pending_owner"'
+count_is 3.05 "No audit rows written by viewer" AuditLog "approved_by eq 'viewer'" 0
+t 3.06 "TO1 untouched after viewer attempts"          - GET "Options('TO1')" '' 200 '"approval_status":"pending"' '"cost_estimate":"180000.00"'
+
+# =====================================================================
+echo "== Group 4: createRisk validation =="
+start_server
+t 4.01 "Valid Tier-2 inferred/medium risk on S3"      manager POST createRisk "$(risk_json RA2 S3 2 medium inferred)" 200 '"status":"created"'
+call - GET "AuditLog?\$filter=$(enc "risk_id eq 'RA2' and action eq 'risk_detected'")"
+check 4.02 "Audit: risk_detected by manager" 200 '"approved_by":"manager"'
+t 4.03 "Duplicate risk ID"                            manager POST createRisk "$(risk_json RA2 S3 2 medium inferred)" 409 'already exists'
+t 4.04 "Missing required field (source)"              manager POST createRisk '{"risk":{"risk_id":"RA3","event":"e","affected_supplier":"S3","tier":2,"confidence":"low","reason":"r","evidence_type":"news"}}' 400
+t 4.05 "Supplier S999 does not exist"                 manager POST createRisk "$(risk_json RA4 S999 2 medium news)" 404 'does not exist'
+t 4.06 "Tier 1 sent for Tier-2 supplier S3"           manager POST createRisk "$(risk_json RA5 S3 1 high news)" 400 'does not match'
+t 4.07 "Confidence 'High' (uppercase)"                manager POST createRisk "$(risk_json RA6 S3 2 High news)" 400 'low, medium or high'
+t 4.08 "Confidence 'banana'"                          manager POST createRisk "$(risk_json RA7 S3 2 banana news)" 400 'low, medium or high'
+t 4.09 "Inferred evidence with high confidence"       manager POST createRisk "$(risk_json RA8 S3 2 high inferred)" 400 'Inferred evidence'
+t 4.10 "Evidence type 'rumour'"                       manager POST createRisk "$(risk_json RA9 S3 2 low rumour)" 400 'Evidence type'
+t 4.11 "Tier 4"                                       manager POST createRisk "$(risk_json RB2 S3 4 low news)" 400 'Tier must be'
+t 4.12 "Declared/high Tier-2 risk on S3 is allowed"   manager POST createRisk "$(risk_json RB3 S3 2 high declared)" 200 '"status":"created"'
+t 4.13 "Tier-3 risk on S5"                            manager POST createRisk "$(risk_json RB4 S5 3 low news)" 200 '"status":"created"'
+t 4.14 "Event longer than 300 characters"             manager POST createRisk "$(risk_json RB5 S3 2 low news "$(printf 'x%.0s' $(seq 1 301))")" 400
+t 4.15 "Rejected risk RA4 was not stored"             - GET "Risks('RA4')" '' 404
+count_is 4.16 "No audit rows for rejected risks" AuditLog "risk_id eq 'RA4' or risk_id eq 'RA5' or risk_id eq 'RA8'" 0
+
+# =====================================================================
+echo "== Group 5: supplier messages =="
+start_server
+t 5.01 "Draft M1 for RB1 to Tier-1 S2"                manager POST createMessage '{"message_id":"M1","risk_id":"RB1","to_supplier":"S2","body":"Please confirm revised date (simulated)"}' 200 '"status":"drafted"'
+t 5.02 "Duplicate message ID M1"                      manager POST createMessage '{"message_id":"M1","risk_id":"RB1","to_supplier":"S2","body":"x"}' 409
+t 5.03 "Create Tier-2 risk RA2 on S3 (setup)"         manager POST createRisk "$(risk_json RA2 S3 2 medium inferred)" 200
+t 5.04 "Draft directly to Tier-2 S3 (bypass Tier-1)"  manager POST createMessage '{"message_id":"M2","risk_id":"RA2","to_supplier":"S3","body":"x"}' 400 'routed through Tier-1 supplier S1'
+t 5.05 "Draft to the wrong Tier-1 (S2 instead of S1)" manager POST createMessage '{"message_id":"M2","risk_id":"RA2","to_supplier":"S2","body":"x"}' 400 'routed through Tier-1 supplier S1'
+t 5.06 "Draft M2 for RA2 to S1"                       manager POST createMessage '{"message_id":"M2","risk_id":"RA2","to_supplier":"S1","body":"x"}' 200
+t 5.07 "Draft for unknown risk"                       manager POST createMessage '{"message_id":"M3","risk_id":"NORISK","to_supplier":"S1","body":"x"}' 404
+t 5.08 "Draft without body"                           manager POST createMessage '{"message_id":"M3","risk_id":"RB1","to_supplier":"S2"}' 400
+t 5.09 "Draft with language 'fr'"                     manager POST createMessage '{"message_id":"M3","risk_id":"RB1","to_supplier":"S2","body":"x","language":"fr"}' 400
+t 5.10 "Message ID longer than 10 characters"         manager POST createMessage '{"message_id":"M123456789012","risk_id":"RB1","to_supplier":"S2","body":"x"}' 400
+t 5.11 "Send M2 without any approved option"          manager POST sendSimulatedMessage '{"message_id":"M2"}' 409 'Approve a recovery option'
+t 5.12 "Reply to M1 before sending"                   manager POST recordSupplierReply '{"message_id":"M1","reply_text":"ok"}' 409 'after simulated sending'
+t 5.13 "Approve TO1 for RB1 (setup)"                  manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"approved"'
+t 5.14 "Send M1"                                      manager POST sendSimulatedMessage '{"message_id":"M1"}' 200 '"status":"sent_simulated"' 'No real message was sent'
+t 5.15 "Send M1 again"                                manager POST sendSimulatedMessage '{"message_id":"M1"}' 409
+t 5.16 "Reply with empty text"                        manager POST recordSupplierReply '{"message_id":"M1","reply_text":"   "}' 400
+t 5.17 "Record reply to M1"                           manager POST recordSupplierReply '{"message_id":"M1","reply_text":"Partial shipment possible (simulated)"}' 200 '"status":"reply_received"'
+t 5.18 "M1 status is reply_received"                  - GET "Messages('M1')" '' 200 '"status":"reply_received"' 'Partial shipment possible'
+t 5.19 "Reply to M1 again"                            manager POST recordSupplierReply '{"message_id":"M1","reply_text":"again"}' 409 'already been recorded'
+t 5.20 "Send unknown message"                         manager POST sendSimulatedMessage '{"message_id":"NOPE"}' 404
+call - GET "AuditLog?\$filter=$(enc "action eq 'message_sent'")"
+check 5.21 "Audit: message_sent by manager" 200 '"approved_by":"manager"' '"status":"sent_simulated"'
+
+# =====================================================================
+echo "== Group 6: concurrency (two identical requests at the same time) =="
+echo "   NOTE: local SQLite runs requests one at a time. These tests prove the"
+echo "   'one winner, loser gets 409, no extra audit row' behaviour, but they are"
+echo "   NOT equivalent to concurrency validation on SAP HANA."
+start_server
+parallel_twice owner approveOption '{"option_id":"TO2"}'
+STATUS=$([ "$PAR_CODES" = "200 409" ] && echo ok || echo "$PAR_CODES"); RESP=""
+check 6.01 "Two parallel owner approvals of TO2 -> one 200, one 409 (got: $PAR_CODES)" ok
+count_is 6.02 "Exactly one approval audit row for TO2" AuditLog "option_id eq 'TO2' and status eq 'approved'" 1
+call manager POST createMessage '{"message_id":"M1","risk_id":"RB1","to_supplier":"S2","body":"x"}'
+parallel_twice manager sendSimulatedMessage '{"message_id":"M1"}'
+STATUS=$([ "$PAR_CODES" = "200 409" ] && echo ok || echo "$PAR_CODES"); RESP=""
+check 6.03 "Two parallel sends of M1 -> one 200, one 409 (got: $PAR_CODES)" ok
+count_is 6.04 "Exactly one message_sent audit row" AuditLog "action eq 'message_sent'" 1
+parallel_twice manager recordSupplierReply '{"message_id":"M1","reply_text":"ok"}'
+STATUS=$([ "$PAR_CODES" = "200 409" ] && echo ok || echo "$PAR_CODES"); RESP=""
+check 6.05 "Two parallel replies to M1 -> one 200, one 409 (got: $PAR_CODES)" ok
+count_is 6.06 "Exactly one supplier_reply audit row" AuditLog "action eq 'supplier_reply'" 1
+parallel_twice manager rejectOption '{"option_id":"TO1","reason":"x"}'
+STATUS=$([ "$PAR_CODES" = "200 409" ] && echo ok || echo "$PAR_CODES"); RESP=""
+check 6.07 "Two parallel rejections of TO1 -> one 200, one 409 (got: $PAR_CODES)" ok
+count_is 6.08 "Exactly one reject audit row for TO1" AuditLog "option_id eq 'TO1' and action eq 'reject'" 1
+
+# =====================================================================
+echo "== Group 7: production safety net (production profile, local SQLite, mocked login) =="
+CDS_CONFIG='{"requires":{"db":{"kind":"sqlite","credentials":{"url":":memory:"},"model":["db/schema.cds"]},"auth":{"kind":"mocked"}}}' \
+  start_server --profile production
+t 7.01 "Unauthenticated approveOption in production"   - POST approveOption '{"option_id":"TO1","approver_role":"plant_owner","approved_by":"x"}' 401
+t 7.02 "Unauthenticated createRisk in production"      - POST createRisk "$(risk_json RA2 S3 2 medium inferred)" 401
+t 7.03 "Unauthenticated sendSimulatedMessage in prod." - POST sendSimulatedMessage '{"message_id":"M1"}' 401
+t 7.04 "TO1 unchanged"                                 - GET "Options('TO1')" '' 200 '"approval_status":"pending"'
+count_is 7.05 "No audit rows written" AuditLog "audit_id gt 0" 0
+
+# =====================================================================
+echo "== Known gaps (scheduled for Batch 2; not counted) =="
+start_server
+gap G1 "Direct PATCH of Options approval_status"  - PATCH "Options('TO2')" '{"approval_status":"approved"}' 200
+gap G2 "Direct POST of an already-'sent' message"  - POST Messages '{"message_id":"MX","risk_id":"RB1","to_supplier":"S2","status":"sent_simulated"}' 201
+gap G3 "Direct POST of a forged AuditLog row"     - POST AuditLog '{"audit_id":999,"risk_id":"RB1","action":"approve","status":"approved"}' 201
+gap G4 "Direct DELETE of an AuditLog row"         - DELETE "AuditLog(999)" '' 204
+gap G5 "Unauthenticated approval in development"  - POST approveOption '{"option_id":"TO1","approver_role":"procurement_manager","approved_by":"x"}' 200
+stop_server
+
+# =====================================================================
+echo
+echo "RESULT: $PASS passed, $FAIL failed"
+if [ $FAIL -gt 0 ]; then
+  echo "Failed: ${FAILED_IDS[*]}"
+  exit 1
+fi
+exit 0

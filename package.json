@@ -13,6 +13,16 @@
   },
   "cds": {
     "requires": {
+      "auth": {
+        "[development]": {
+          "kind": "mocked",
+          "users": {
+            "manager": { "password": "", "roles": ["procurement_manager"] },
+            "owner":   { "password": "", "roles": ["plant_owner"] },
+            "viewer":  { "password": "", "roles": [] }
+          }
+        }
+      },
       "db": {
         "[development]": {
           "model": ["db/schema.cds"]
