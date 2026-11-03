@@ -2,8 +2,12 @@
 import cds from '@sap/cds';
 import { randomInt } from 'node:crypto';
 import { writeAudit } from './lib/audit.js';
+// P3's code, copied unchanged (Batch 3b). P4 wraps it with validation,
+// authorisation, persistence and audit; it does not change P3's calculations.
+import p3Rules from './lib/rules.cjs';
+import p3Draft from './lib/draftMessage.cjs';
 
-const { SELECT, INSERT, UPDATE } = cds.ql;
+const { SELECT, INSERT, UPDATE, DELETE } = cds.ql;
 
 // Roles that may take decisions on recovery options.
 const DECISION_ROLES = ['plant_owner', 'procurement_manager'];
@@ -18,8 +22,65 @@ const STATE_CHANGING_ACTIONS = [
     'approveMessage',
     'rejectMessage',
     'sendSimulatedMessage',
-    'recordSupplierReply'
+    'recordSupplierReply',
+    'assessRisk',
+    'generateMessageDraft'
 ];
+
+// Official option types (owned by P3; agreed with P2 and P5).
+const OPTION_TYPES = ['alternate_supplier', 'expedite_shipment', 'buffer_top_up'];
+
+const isNonNegInt = (v) => Number.isInteger(v) && v >= 0;
+const norm = (v) => String(v ?? '').trim().toLowerCase();
+
+/** Small error type so helpers can stop a request with an HTTP status. */
+class HttpError extends Error {
+    constructor(status, message) { super(message); this.status = status; }
+}
+
+/**
+ * Walks the supplier chain from the affected supplier up to its Tier-1 root,
+ * checking every link: each parent must exist and be exactly one tier higher
+ * (Tier-3 -> Tier-2 -> Tier-1). Returns [affected, ..., root].
+ */
+async function resolveSupplierChain(tx, supplierId) {
+    const chain = [];
+    let current = await tx.run(SELECT.one.from('Suppliers').where({ supplier_id: supplierId }));
+
+    if (!current) {
+        throw new HttpError(404, `Affected supplier ${supplierId} does not exist.`);
+    }
+
+    if (![1, 2, 3].includes(Number(current.tier))) {
+        throw new HttpError(422, `Supplier ${supplierId} has an invalid tier (${current.tier}).`);
+    }
+
+    chain.push(current);
+
+    while (Number(current.tier) > 1) {
+        if (!current.parent_id) {
+            throw new HttpError(422, `Supplier chain is incomplete: ${current.supplier_id} (Tier-${current.tier}) has no parent.`);
+        }
+
+        const parent = await tx.run(SELECT.one.from('Suppliers').where({ supplier_id: current.parent_id }));
+
+        if (!parent) {
+            throw new HttpError(422, `Supplier chain is incomplete: parent ${current.parent_id} of ${current.supplier_id} was not found.`);
+        }
+
+        if (Number(parent.tier) !== Number(current.tier) - 1) {
+            throw new HttpError(
+                422,
+                `Supplier chain is inconsistent: ${current.supplier_id} (Tier-${current.tier}) has parent ${parent.supplier_id} (Tier-${parent.tier}).`
+            );
+        }
+
+        chain.push(parent);
+        current = parent;
+    }
+
+    return chain;
+}
 
 // Database table for messages. The service entity 'Messages' is a read-only
 // join (it adds about_supplier), so handlers read and write the table itself.
@@ -482,6 +543,12 @@ export default class MediShieldService extends cds.ApplicationService {
             const changes = {};
 
             if (option_type !== undefined && option_type !== null) {
+                if (!OPTION_TYPES.includes(option_type)) {
+                    return req.reject(
+                        400,
+                        `Option type must be one of: ${OPTION_TYPES.join(', ')}.`
+                    );
+                }
                 changes.type = option_type;
             }
 
@@ -1015,6 +1082,289 @@ export default class MediShieldService extends cds.ApplicationService {
                 message_id,
                 option_id: message.option_id
             };
+        });
+
+        // --------------------------------------------------
+        // 8. ASSESS RISK (Batch 3b: runs P3's impact and option rules)
+        // --------------------------------------------------
+        this.on('assessRisk', async (req) => {
+            const { risk_id } = req.data;
+
+            if (!risk_id) {
+                return req.reject(400, 'Risk ID is required.');
+            }
+
+            const tx = cds.tx(req);
+
+            try {
+                const risk = await tx.run(SELECT.one.from('Risks').where({ risk_id }));
+
+                if (!risk) {
+                    return req.reject(404, 'Risk not found.');
+                }
+
+                // 1. Supplier chain: affected -> (Tier-2) -> Tier-1 root, fully validated
+                const chain = await resolveSupplierChain(tx, risk.affected_supplier);
+                const affected = chain[0];
+                const root = chain[chain.length - 1];
+
+                if (Number(risk.tier) !== Number(affected.tier)) {
+                    throw new HttpError(422, `Risk tier ${risk.tier} does not match supplier ${affected.supplier_id} (Tier-${affected.tier}).`);
+                }
+
+                // 2. Stock: the Tier-1 root supplier's material (what we buy and hold)
+                const material = root.material;
+                const stock = material && await tx.run(SELECT.one.from('Stock').where({ material }));
+
+                if (!stock) {
+                    throw new HttpError(422, `No stock data for material '${material}' (Tier-1 supplier ${root.supplier_id}). Assessment not possible.`);
+                }
+
+                if (!isNonNegInt(stock.stock_units) || !isNonNegInt(stock.lead_time_days)) {
+                    throw new HttpError(422, `Stock data for '${material}' is incomplete or invalid.`);
+                }
+
+                if (!Number.isInteger(stock.daily_usage) || stock.daily_usage <= 0) {
+                    throw new HttpError(422, `Daily usage for '${material}' must be greater than zero. Days of stock cannot be calculated.`);
+                }
+
+                // 3. Declaration (Tier-2/3 only): the Tier-1 root's SUBMITTED declaration
+                //    naming the upstream supplier directly below the root (the affected
+                //    supplier for Tier-2, its Tier-2 parent for Tier-3) for the same material.
+                let declaration = null;
+
+                if (chain.length > 1) {
+                    const upstream = chain[chain.length - 2];
+                    const submitted = await tx.run(
+                        SELECT.from('SupplierDeclarations').where({ tier1_supplier: root.supplier_id, status: 'submitted' })
+                    );
+                    const matches = submitted.filter((d) =>
+                        norm(d.upstream_name) === norm(upstream.name) && norm(d.material) === norm(material)
+                    );
+
+                    if (matches.length > 1) {
+                        throw new HttpError(
+                            422,
+                            `More than one submitted declaration matches ${upstream.name} / ${material} (${matches.map((d) => d.declaration_id).join(', ')}). Resolve the duplicate first.`
+                        );
+                    }
+
+                    declaration = matches[0] || null;
+                }
+
+                // 4. Alternate source: another Tier-1 supplier with the same material
+                const alternates = await tx.run(
+                    SELECT.from('Suppliers').columns('supplier_id').where({ tier: 1, material })
+                );
+                const hasAlternate = alternates.some((a) => a.supplier_id !== root.supplier_id);
+
+                // 5. P3's calculation (unchanged code)
+                const { impact, calc } = p3Rules.calcImpactCore({ risk, stock, declaration });
+                const ranked = p3Rules.rankOptionsCore({ risk, impact, calc, stock, declaration, hasAlternate });
+
+                // 6. Validate P3's output before anything is stored
+                if (!isNonNegInt(impact.delay_days) || !isNonNegInt(impact.days_of_stock) ||
+                    typeof impact.production_at_risk !== 'string' || impact.production_at_risk.length > 100) {
+                    throw new HttpError(422, 'The impact calculation produced invalid values. Nothing was stored.');
+                }
+
+                if (!Array.isArray(ranked) || ranked.length === 0) {
+                    throw new HttpError(422, 'The option ranking produced no options. Nothing was stored.');
+                }
+
+                for (const o of ranked) {
+                    const cost = Number(o.cost_estimate);
+                    if (!OPTION_TYPES.includes(o.type) || !Number.isFinite(cost) || cost < 0 || cost > 9999999999.99 ||
+                        !isNonNegInt(o.delay_saved_days) || !Number.isInteger(o.option_rank) || o.option_rank < 1) {
+                        throw new HttpError(422, `The option ranking produced an invalid option (${o.type}). Nothing was stored.`);
+                    }
+                }
+
+                // 7. Reassessment rules: only while every option is pending and no message exists
+                const existingMessages = await tx.run(
+                    SELECT.from('Messages').columns('message_id').where({ risk_id })
+                );
+
+                if (existingMessages.length > 0) {
+                    throw new HttpError(409, `Risk ${risk_id} cannot be reassessed: a supplier message already exists for it.`);
+                }
+
+                const existingOptions = await tx.run(
+                    SELECT.from('Options').columns('option_id', 'approval_status').where({ risk_id })
+                );
+                const decided = existingOptions.filter((o) => o.approval_status !== 'pending');
+
+                if (decided.length > 0) {
+                    throw new HttpError(
+                        409,
+                        `Risk ${risk_id} cannot be reassessed: option(s) ${decided.map((o) => `${o.option_id} (${o.approval_status})`).join(', ')} already decided or escalated.`
+                    );
+                }
+
+                const existingImpact = await tx.run(SELECT.one.from('Impacts').where({ risk_id }));
+
+                // 'reassessed' only if this risk was assessed before. The audit trail is
+                // the record of previous assessments; replaced seed options or a
+                // pre-loaded Impact row alone do not count as an assessment.
+                const previousAssessment = await tx.run(
+                    SELECT.one.from('AuditLog').columns('audit_id')
+                        .where({ risk_id, action: { in: ['risk_assessed', 'risk_reassessed'] } })
+                );
+                const isReassessment = Boolean(previousAssessment);
+
+                // Replace pending options (conditional: all must still be pending)
+                if (existingOptions.length > 0) {
+                    const removed = await tx.run(
+                        DELETE.from('Options').where({ risk_id, approval_status: 'pending' })
+                    );
+
+                    if (removed !== existingOptions.length) {
+                        throw new HttpError(409, 'Options of this risk were changed by another request. Reload and try again.');
+                    }
+                }
+
+                const impactRow = {
+                    delay_days: impact.delay_days,
+                    days_of_stock: impact.days_of_stock,
+                    production_at_risk: impact.production_at_risk
+                };
+
+                if (existingImpact) {
+                    await tx.run(UPDATE('Impacts').set(impactRow).where({ risk_id }));
+                } else {
+                    await tx.run(INSERT.into('Impacts').entries({ risk_id, ...impactRow }));
+                }
+
+                // Store options with P4-generated IDs (P3's own IDs are ignored)
+                const stored = [];
+                for (const o of ranked) {
+                    const option_id = await generateId(tx, 'Options', 'option_id', 'O');
+                    const row = {
+                        option_id,
+                        risk_id,
+                        type: o.type,
+                        cost_estimate: o.cost_estimate,
+                        delay_saved_days: o.delay_saved_days,
+                        option_rank: o.option_rank,
+                        approval_status: 'pending'
+                    };
+                    await tx.run(INSERT.into('Options').entries(row));
+                    stored.push(row);
+                }
+
+                // Audit (new row; existing audit rows are never changed or deleted)
+                const actor = getActor(req);
+                const summary =
+                    `${isReassessment ? 'Reassessed' : 'Assessed'}: delay ${impact.delay_days}d, stock ${impact.days_of_stock}d; ` +
+                    `declaration ${declaration ? declaration.declaration_id : 'none'}; alternate ${hasAlternate ? 'yes' : 'no'}; ` +
+                    `options ${stored.map((o) => `${o.option_id}=${o.type}`).join(', ')}` +
+                    (existingOptions.length ? `; replaced ${existingOptions.map((o) => o.option_id).join(', ')}` : '');
+
+                await writeAudit(tx, {
+                    risk_id,
+                    action: isReassessment ? 'risk_reassessed' : 'risk_assessed',
+                    approver_role: actor.role,
+                    approved_by: actor.name,
+                    reason: summary.slice(0, 300),
+                    status: 'assessed'
+                });
+
+                return {
+                    success: true,
+                    status: isReassessment ? 'reassessed' : 'assessed',
+                    message: `Impact and ${stored.length} ranked options stored (simulated rule-based assessment).`,
+                    risk_id,
+                    material,
+                    declaration_id: declaration ? declaration.declaration_id : null,
+                    has_alternate: hasAlternate,
+                    delay_days: impact.delay_days,
+                    days_of_stock: impact.days_of_stock,
+                    production_at_risk: impact.production_at_risk,
+                    options: stored.map(({ risk_id: _r, ...o }) => o)
+                };
+            } catch (e) {
+                if (e instanceof HttpError) return req.reject(e.status, e.message);
+                throw e;   // database or unexpected errors are not disguised (500, rolled back)
+            }
+        });
+
+
+        // --------------------------------------------------
+        // 9. GENERATE MESSAGE DRAFT (Batch 3b: P3's rule-based template)
+        // --------------------------------------------------
+        this.on('generateMessageDraft', async (req) => {
+            const { option_id, message_id } = req.data;
+
+            if (!option_id) {
+                return req.reject(400, 'Option ID is required.');
+            }
+
+            const tx = cds.tx(req);
+
+            try {
+                const option = await tx.run(SELECT.one.from('Options').where({ option_id }));
+
+                if (!option) {
+                    return req.reject(404, 'Recovery option not found.');
+                }
+
+                if (option.approval_status === 'rejected') {
+                    return req.reject(409, 'A message cannot be drafted for a rejected option.');
+                }
+
+                const risk = await tx.run(SELECT.one.from('Risks').where({ risk_id: option.risk_id }));
+                const impact = await tx.run(SELECT.one.from('Impacts').where({ risk_id: option.risk_id }));
+
+                if (!risk) {
+                    return req.reject(404, 'Associated risk not found.');
+                }
+
+                if (!impact) {
+                    return req.reject(409, `Assess risk ${option.risk_id} first (assessRisk) so the draft can state the impact.`);
+                }
+
+                const chain = await resolveSupplierChain(tx, risk.affected_supplier);
+                const root = chain[chain.length - 1];
+
+                // P3's draft (unchanged code). P4 only supplies the material as input.
+                const draft = await p3Draft.draftMessage({
+                    risk: { ...risk, material: root.material },
+                    impact,
+                    tier1: root
+                });
+                const draftSource = draft._source === 'genai_hub' ? 'genai_hub' : 'template';
+
+                if (typeof draft.body !== 'string' || draft.body.length === 0 || draft.body.length > 2000) {
+                    return req.reject(422, 'The generated draft is empty or longer than 2000 characters.');
+                }
+
+                // Store it through createMessage, so every createMessage rule applies
+                // (Tier-1 routing, option checks, duplicate ID, generated ID, audit).
+                const created = await this.send('createMessage', {
+                    message_id: message_id || undefined,
+                    risk_id: risk.risk_id,
+                    option_id,
+                    to_supplier: root.supplier_id,
+                    body: draft.body,
+                    language: 'en'
+                });
+
+                return {
+                    success: true,
+                    status: created.status,
+                    message: draftSource === 'template'
+                        ? 'Draft created from the rule-based template (not AI). Review it before approval.'
+                        : 'Draft created using SAP Generative AI Hub. Review it before approval.',
+                    message_id: created.message_id,
+                    option_id,
+                    to_supplier: root.supplier_id,
+                    about_supplier: risk.affected_supplier,
+                    draft_source: draftSource
+                };
+            } catch (e) {
+                if (e instanceof HttpError) return req.reject(e.status, e.message);
+                throw e;
+            }
         });
 
         return super.init();

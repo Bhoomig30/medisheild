@@ -1,3 +1,3 @@
 option_id;risk_id;type;cost_estimate;delay_saved_days;option_rank;approval_status
-TO1;RB1;alternative_supplier;180000;7;1;pending
-TO2;RB1;expedited_shipping;250000;9;2;pending
+TO1;RB1;alternate_supplier;180000;7;1;pending
+TO2;RB1;expedite_shipment;250000;9;2;pending

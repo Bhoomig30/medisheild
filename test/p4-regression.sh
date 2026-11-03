@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =====================================================================
-# MediShield P4 - regression tests (up to and including Batch 3a)
+# MediShield P4 - regression tests (up to and including Batch 3b)
 #
 # Run from the project root (the folder that contains package.json):
 #     bash test/p4-regression.sh
@@ -121,6 +121,12 @@ parallel_twice() {
   wait $p1 $p2
   PAR_CODES=$(printf '%s\n%s\n' "$(cat "$f1")" "$(cat "$f2")" | sort | tr '\n' ' ' | sed 's/ $//')
   rm -f "$f1" "$f2"
+}
+
+# opt_id RISK RANK -> prints the option_id with that rank (as viewer)
+opt_id() {
+  curl -s -u viewer: "$BASE/Options?\$filter=$(enc "risk_id eq '$1' and option_rank eq $2")&\$select=option_id" \
+    | grep -o '"option_id":"[^"]*"' | head -1 | cut -d'"' -f4
 }
 
 risk_json() { # risk_id supplier tier confidence evidence [event]
@@ -335,7 +341,7 @@ STATUS=$([ "$RESP" = "$AUDIT_BEFORE" ] && echo 200 || echo "count $RESP vs $AUDI
 check 8.305 "AuditLog row count unchanged ($AUDIT_BEFORE)" 200
 t 8.306 "Audit row 1 not modified"     viewer GET "AuditLog(1)" '' 200 '"action":"message_created"'
 
-echo "== Group 9: all 9 actions x anonymous / viewer / alice =="
+echo "== Group 9: all 11 actions x anonymous / viewer / alice =="
 ACTIONS=(
   "createRisk|$(risk_json RA2 S3 2 medium inferred)"
   "approveOption|{\"option_id\":\"TO1\",\"approver_role\":\"plant_owner\",\"approved_by\":\"x\"}"
@@ -344,6 +350,8 @@ ACTIONS=(
   "createMessage|{\"message_id\":\"M2\",\"risk_id\":\"RB1\",\"option_id\":\"TO1\",\"to_supplier\":\"S2\",\"body\":\"x\"}"
   "approveMessage|{\"message_id\":\"M1\"}"
   "rejectMessage|{\"message_id\":\"M1\",\"reason\":\"x\"}"
+  "assessRisk|{\"risk_id\":\"RB1\"}"
+  "generateMessageDraft|{\"option_id\":\"TO1\"}"
   "sendSimulatedMessage|{\"message_id\":\"M1\"}"
   "recordSupplierReply|{\"message_id\":\"M1\",\"reply_text\":\"x\"}"
 )
@@ -360,6 +368,7 @@ check 9.90 "No audit rows written by refused action calls" 200
 t 9.91 "Risk RA2 was not created" viewer GET "Risks('RA2')" '' 404
 t 9.92 "Message M1 still drafted" viewer GET "Messages('M1')" '' 200 '"status":"drafted"'
 t 9.93 "Message M2 was not created" viewer GET "Messages('M2')" '' 404
+t 9.94 "RB1 not assessed by refused calls" viewer GET "Impacts('RB1')" '' 404
 stop_server
 
 # =====================================================================
@@ -397,6 +406,103 @@ call viewer GET "Messages?\$filter=$(enc "about_supplier eq 'S2'")&\$select=mess
 check 10.24 "Filter Messages by about_supplier" 200 '"message_id":"M5"'
 count_is 10.25 "Audit rows linked to M5: created, approved" AuditLog "message_id eq 'M5'" 2
 stop_server
+
+# =====================================================================
+echo "== Group 11: assessRisk / generateMessageDraft / option types (Batch 3b) =="
+start_server
+t 11.01 "Seed TO1 type is alternate_supplier"            viewer GET "Options('TO1')" '' 200 '"type":"alternate_supplier"'
+t 11.02 "Seed TO2 type is expedite_shipment"             viewer GET "Options('TO2')" '' 200 '"type":"expedite_shipment"'
+t 11.03 "Draft before the risk is assessed"              manager POST generateMessageDraft '{"option_id":"TO1"}' 409 'Assess risk RB1 first'
+t 11.04 "editOption with an unknown type"                manager POST editOption '{"option_id":"TO1","option_type":"air_freight"}' 400 'Option type must be one of'
+t 11.05 "editOption with an official type"               manager POST editOption '{"option_id":"TO1","option_type":"buffer_top_up"}' 200
+t 11.06 "assessRisk without risk ID"                     manager POST assessRisk '{}' 400
+t 11.07 "assessRisk unknown risk"                        manager POST assessRisk '{"risk_id":"NOPE"}' 404
+t 11.08 "First assessment of RB1 (replaces seed TO1/TO2) -> assessed" manager POST assessRisk '{"risk_id":"RB1"}' 200 '"status":"assessed"' '"days_of_stock":9' '"delay_days":10' '"has_alternate":true' '"declaration_id":null'
+t 11.09 "Seed TO1 replaced"                              viewer GET "Options('TO1')" '' 404
+count_is 11.10 "RB1 has exactly 3 options" Options "risk_id eq 'RB1'" 3
+call viewer GET "Options?\$filter=$(enc "risk_id eq 'RB1'")&\$select=option_id,type"
+N=$(grep -oE '"option_id":"O[0-9A-Z]{9}"' <<< "$RESP" | wc -l); T=$(grep -oE '"type":"(alternate_supplier|expedite_shipment|buffer_top_up)"' <<< "$RESP" | wc -l)
+STATUS=$([ "$N" = 3 ] && [ "$T" = 3 ] && echo 200 || echo "ids=$N types=$T"); RESP=""
+check 11.11 "All 3 option IDs are O + 9 characters with official types" 200
+t 11.12 "Impact stored for RB1"                          viewer GET "Impacts('RB1')" '' 200 '"delay_days":10' '"days_of_stock":9'
+call viewer GET "AuditLog?\$filter=$(enc "risk_id eq 'RB1' and action eq 'risk_assessed'")"
+check 11.13 "Audit: first assessment recorded as risk_assessed, lists replaced TO1, TO2" 200 '"approved_by":"manager"' 'replaced TO1, TO2'
+count_is 11.13b "No risk_reassessed row after the first assessment" AuditLog "risk_id eq 'RB1' and action eq 'risk_reassessed'" 0
+OLD=$(opt_id RB1 1)
+t 11.14 "Second assessment of RB1 -> reassessed"        manager POST assessRisk '{"risk_id":"RB1"}' 200 '"status":"reassessed"'
+count_is 11.14b "Second assessment recorded as risk_reassessed" AuditLog "risk_id eq 'RB1' and action eq 'risk_reassessed'" 1
+t 11.15 "Previous option IDs replaced"                   viewer GET "Options('$OLD')" '' 404
+count_is 11.16 "Still exactly 3 options for RB1" Options "risk_id eq 'RB1'" 3
+count_is 11.17 "Still exactly 1 impact for RB1" Impacts "risk_id eq 'RB1'" 1
+count_is 11.18 "Both assessments kept in the audit (never overwritten)" AuditLog "risk_id eq 'RB1' and (action eq 'risk_assessed' or action eq 'risk_reassessed')" 2
+BUF=$(opt_id RB1 3)
+t 11.19 "Manager approves RB1 rank-3 option (30k)"       manager POST approveOption "{\"option_id\":\"$BUF\"}" 200 '"status":"approved"'
+t 11.20 "Reassess after an approval"                     manager POST assessRisk '{"risk_id":"RB1"}' 409 'already decided'
+t 11.21 "Approved option untouched after refused reassessment" viewer GET "Options('$BUF')" '' 200 '"approval_status":"approved"'
+t 11.22 "Create RA2: Tier-2 S3, 21 days (setup)"         manager POST createRisk "$(risk_json RA2 S3 2 high declared 'Port closure in Zhejiang, 21 days (simulated)')" 200
+t 11.23 "Assess RA2: declaration D1, top option 349k"    manager POST assessRisk '{"risk_id":"RA2"}' 200 '"status":"assessed"' '"declaration_id":"D1"' '"material":"Paracetamol API"' '"cost_estimate":349000'
+TOP=$(opt_id RA2 1)
+t 11.24 "Manager approves 349k option -> pending_owner"  manager POST approveOption "{\"option_id\":\"$TOP\"}" 200 '"status":"pending_owner"'
+t 11.25 "Reassess after escalation"                      manager POST assessRisk '{"risk_id":"RA2"}' 409 'pending_owner'
+t 11.26 "Create RA3: Tier-2 S3 (setup)"                  manager POST createRisk "$(risk_json RA3 S3 2 medium inferred)" 200
+t 11.27 "Assess RA3"                                     manager POST assessRisk '{"risk_id":"RA3"}' 200 '"status":"assessed"'
+R1=$(opt_id RA3 1)
+call manager POST generateMessageDraft "{\"option_id\":\"$R1\"}"
+check 11.28 "Draft for RA3: to Tier-1 S1, about Tier-2 S3, template" 200 '"status":"drafted"' '"to_supplier":"S1"' '"about_supplier":"S3"' '"draft_source":"template"' 'not AI'
+DRAFT=$(grep -o '"message_id":"[^"]*"' <<< "$RESP" | cut -d'"' -f4)
+t 11.29 "Draft body: labelled, to Tier-1, upstream wording, event and figures" viewer GET "Messages('$DRAFT')" '' 200 '[SIMULATED DRAFT - TEMPLATE, NOT AI] Dear Sharma Traders' 'upstream supply disruption' 'Port closure in Zhejiang (simulated)' 'stock covers 9 days' 'disruption period is 14 days' '"status":"drafted"' "\"option_id\":\"$R1\""
+t 11.30 "Reassess after a message exists"                manager POST assessRisk '{"risk_id":"RA3"}' 409 'message already exists'
+t 11.31 "Draft with a duplicate message ID"              manager POST generateMessageDraft "{\"option_id\":\"$R1\",\"message_id\":\"$DRAFT\"}" 409 'already exists'
+t 11.32 "Draft for unknown option"                       manager POST generateMessageDraft '{"option_id":"NOPE"}' 404
+R3=$(opt_id RA3 3)
+t 11.33 "Reject RA3 rank-3 option (setup)"               manager POST rejectOption "{\"option_id\":\"$R3\",\"reason\":\"Not needed\"}" 200
+t 11.34 "Draft for a rejected option"                    manager POST generateMessageDraft "{\"option_id\":\"$R3\"}" 409 'rejected option'
+t 11.35 "Viewer cannot assess"                           viewer POST assessRisk '{"risk_id":"RA3"}' 403
+t 11.36 "Viewer cannot generate drafts"                  viewer POST generateMessageDraft "{\"option_id\":\"$R1\"}" 403
+
+echo "-- end-to-end demo scenario A: Tier-2 port closure -> owner approval -> simulated message -> reply --"
+t 11.40 "createRisk RA4 (Tier-2 S3, 21 days, declared)"  manager POST createRisk "$(risk_json RA4 S3 2 high declared 'Port closure in Zhejiang, 21 days (simulated)')" 200
+t 11.41 "assessRisk RA4"                                 manager POST assessRisk '{"risk_id":"RA4"}' 200 '"declaration_id":"D1"'
+A1=$(opt_id RA4 1)
+t 11.42 "Manager approves top option -> pending_owner"   manager POST approveOption "{\"option_id\":\"$A1\"}" 200 '"status":"pending_owner"'
+t 11.43 "Plant owner approves it"                        owner   POST approveOption "{\"option_id\":\"$A1\"}" 200 '"status":"approved"'
+call manager POST generateMessageDraft "{\"option_id\":\"$A1\"}"
+check 11.44 "Draft generated for the approved option" 200 '"status":"drafted"' '"to_supplier":"S1"'
+AM=$(grep -o '"message_id":"[^"]*"' <<< "$RESP" | cut -d'"' -f4)
+t 11.45 "Approve the message"                            manager POST approveMessage "{\"message_id\":\"$AM\"}" 200 '"status":"approved"'
+t 11.46 "Send (simulated)"                               manager POST sendSimulatedMessage "{\"message_id\":\"$AM\"}" 200 'No real message was sent'
+t 11.47 "Record the Tier-1 reply"                        manager POST recordSupplierReply "{\"message_id\":\"$AM\",\"reply_text\":\"S3 affected; 60 percent share, no backup (simulated)\"}" 200 '"status":"reply_received"'
+count_is 11.48 "Audit trail for RA4: 8 rows (risk, assess, escalate, approve, draft, approve msg, send, reply)" AuditLog "risk_id eq 'RA4'" 8
+
+echo "-- parallel assessment of the same new risk --"
+call manager POST createRisk "$(risk_json RA5 S3 2 medium inferred)"
+parallel_twice manager assessRisk '{"risk_id":"RA5"}'
+STATUS=$([ "$PAR_CODES" = "200 200" ] && echo ok || echo "$PAR_CODES"); RESP=""
+check 11.50 "Two parallel assessments -> both allowed by rule 5 while pending (got: $PAR_CODES)" ok
+count_is 11.51 "RA5: still exactly 3 options" Options "risk_id eq 'RA5'" 3
+count_is 11.52 "RA5: exactly 1 impact" Impacts "risk_id eq 'RA5'" 1
+count_is 11.53 "RA5: two assessment audit rows" AuditLog "risk_id eq 'RA5' and (action eq 'risk_assessed' or action eq 'risk_reassessed')" 2
+count_is 11.54 "RA5: exactly one of them is risk_assessed (first)" AuditLog "risk_id eq 'RA5' and action eq 'risk_assessed'" 1
+stop_server
+
+# =====================================================================
+echo "== Group 12: assessRisk data conditions (in-process, own test database) =="
+P3_RULES_SHA=57b6825644d021f6d2897a4fb8f1317c1e342c51a61167b8a7eb069f3197d126
+P3_DRAFT_SHA=f8408d4c5ee587ffbefdecdcd431fe64bc2c0abf8e17163f8a29bfcadb7a8f66
+STATUS=$([ "$(sha256sum srv/lib/rules.cjs | cut -d' ' -f1)" = "$P3_RULES_SHA" ] && echo 200 || echo changed); RESP=""
+check 12.00a "P3 rules.cjs is byte-identical to P3's delivered file" 200
+STATUS=$([ "$(sha256sum srv/lib/draftMessage.cjs | cut -d' ' -f1)" = "$P3_DRAFT_SHA" ] && echo 200 || echo changed); RESP=""
+check 12.00b "P3 draftMessage.cjs is byte-identical to P3's delivered file" 200
+NODE_OUT=$(node test/p4-assess-cases.mjs 2>&1)
+grep -E '^(PASS|FAIL|      )' <<< "$NODE_OUT"
+NODE_LINE=$(grep '^NODE_RESULT' <<< "$NODE_OUT")
+if [ -z "$NODE_LINE" ]; then
+  FAIL=$((FAIL + 1)); FAILED_IDS+=("12.xx"); echo "FAIL  12.xx  node test did not complete:"; tail -20 <<< "$NODE_OUT"
+else
+  read -r _ NP NF <<< "$NODE_LINE"
+  PASS=$((PASS + NP)); FAIL=$((FAIL + NF))
+  [ "$NF" -gt 0 ] && FAILED_IDS+=($(grep '^FAIL' <<< "$NODE_OUT" | awk '{print $2}'))
+fi
 
 # =====================================================================
 echo
