@@ -7,7 +7,7 @@ const { SELECT, INSERT, UPDATE } = cds.ql;
 // Roles that may take decisions on recovery options.
 const DECISION_ROLES = ['plant_owner', 'procurement_manager'];
 
-// State-changing actions; these must never run unauthenticated in production.
+// State-changing actions; these must never run without a login and a decision role.
 const STATE_CHANGING_ACTIONS = [
     'createRisk',
     'approveOption',
@@ -20,9 +20,10 @@ const STATE_CHANGING_ACTIONS = [
 
 /**
  * Who is making this request?
- * - Logged-in user: name and role come from the login (trusted).
- * - Not logged in (development only): recorded as 'anonymous' with no role.
- *   A name sent in the request body is never recorded as a verified identity.
+ * Name and role come ONLY from the login (req.user). Values sent in the
+ * request body (approver_role, approved_by) are never used for identity.
+ * The 'anonymous' branch is a defensive fallback: since Batch 2 the service
+ * requires a login, so unauthenticated calls are rejected before any handler.
  */
 function getActor(req) {
     const user = req.user;
@@ -36,10 +37,6 @@ function getActor(req) {
     return { authenticated: true, name: user.id, role };
 }
 
-function isProduction() {
-    return (cds.env.profiles || []).includes('production');
-}
-
 export default class MediShieldService extends cds.ApplicationService {
 
     async init() {
@@ -51,10 +48,18 @@ export default class MediShieldService extends cds.ApplicationService {
             Messages
         } = this.entities;
 
-        // Production safety net: no state-changing action without a login.
+        // Second line of defence behind the @requires annotations in
+        // medishield-service.cds: a login and a decision role are required
+        // for every state-changing action, in every profile.
         this.before(STATE_CHANGING_ACTIONS, (req) => {
-            if (isProduction() && !getActor(req).authenticated) {
+            const actor = getActor(req);
+
+            if (!actor.authenticated) {
                 return req.reject(401, 'Authentication is required.');
+            }
+
+            if (!actor.role) {
+                return req.reject(403, 'You are not authorised to perform this action.');
             }
         });
 
@@ -207,12 +212,9 @@ export default class MediShieldService extends cds.ApplicationService {
         // 2. APPROVE RECOVERY OPTION
         // --------------------------------------------------
         this.on('approveOption', async (req) => {
-            const {
-                option_id,
-                approver_role,
-                approved_by,
-                reason
-            } = req.data;
+            // approver_role / approved_by are DEPRECATED request fields:
+            // accepted for backward compatibility but deliberately ignored.
+            const { option_id, reason } = req.data;
 
             const actor = getActor(req);
 
@@ -220,22 +222,13 @@ export default class MediShieldService extends cds.ApplicationService {
                 return req.reject(400, 'Option ID is required.');
             }
 
-            // Not logged in (development only): the legacy request fields are still required
-            if (!actor.authenticated && (!approver_role || !approved_by)) {
-                return req.reject(
-                    400,
-                    'Option ID, approver role and approver name are required.'
-                );
-            }
-
             // Logged in without a decision role (e.g. viewer)
-            if (actor.authenticated && !actor.role) {
+            if (!actor.authenticated || !actor.role) {
                 return req.reject(403, 'You are not authorised to approve recovery options.');
             }
 
-            // Role used for the threshold rule: the login role when logged in;
-            // the request field only for unauthenticated development calls (removed in Batch 2).
-            const effectiveRole = actor.authenticated ? actor.role : approver_role;
+            // Role used for the threshold rule: always the login role
+            const effectiveRole = actor.role;
 
             const tx = cds.tx(req);
 
@@ -350,12 +343,9 @@ export default class MediShieldService extends cds.ApplicationService {
         // 3. REJECT RECOVERY OPTION
         // --------------------------------------------------
         this.on('rejectOption', async (req) => {
-            const {
-                option_id,
-                approver_role,
-                approved_by,
-                reason
-            } = req.data;
+            // approver_role / approved_by are DEPRECATED request fields:
+            // accepted for backward compatibility but deliberately ignored.
+            const { option_id, reason } = req.data;
 
             const actor = getActor(req);
 
@@ -363,16 +353,8 @@ export default class MediShieldService extends cds.ApplicationService {
                 return req.reject(400, 'Option ID and rejection reason are required.');
             }
 
-            // Not logged in (development only): the legacy request fields are still required
-            if (!actor.authenticated && (!approver_role || !approved_by)) {
-                return req.reject(
-                    400,
-                    'Option ID, role, name and rejection reason are required.'
-                );
-            }
-
             // Logged in without a decision role (e.g. viewer)
-            if (actor.authenticated && !actor.role) {
+            if (!actor.authenticated || !actor.role) {
                 return req.reject(403, 'You are not authorised to reject recovery options.');
             }
 
@@ -440,9 +422,9 @@ export default class MediShieldService extends cds.ApplicationService {
                 option_type,
                 cost_estimate,
                 delay_saved_days,
-                approved_by,
                 reason
             } = req.data;
+            // approved_by is a DEPRECATED request field: accepted but ignored.
 
             const actor = getActor(req);
 
@@ -450,16 +432,8 @@ export default class MediShieldService extends cds.ApplicationService {
                 return req.reject(400, 'Option ID is required.');
             }
 
-            // Not logged in (development only): the legacy editor-name field is still required
-            if (!actor.authenticated && !approved_by) {
-                return req.reject(
-                    400,
-                    'Option ID and editor name are required.'
-                );
-            }
-
             // Logged in without a decision role (e.g. viewer)
-            if (actor.authenticated && !actor.role) {
+            if (!actor.authenticated || !actor.role) {
                 return req.reject(403, 'You are not authorised to edit recovery options.');
             }
 

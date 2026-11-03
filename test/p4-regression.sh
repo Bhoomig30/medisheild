@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =====================================================================
-# MediShield P4 - regression tests (up to and including Batch 1)
+# MediShield P4 - regression tests (up to and including Batch 2)
 #
 # Run from the project root (the folder that contains package.json):
 #     bash test/p4-regression.sh
@@ -9,8 +9,8 @@
 # - Every group starts a fresh in-memory SQLite database, so groups do not
 #   affect each other. Nothing is written to HANA or to P2's HACKFEST0368.
 # - Development test users (package.json): manager, owner, viewer (no password).
-# - "GAP" lines are known open issues scheduled for Batch 2. They are reported
-#   honestly but not counted as pass/fail.
+#   'alice' is one of CAP's built-in mock users; she has no MediShield role.
+# - Since Batch 2 every request needs a login, so reads are done as 'viewer'.
 #
 # Exit code: 0 = all tests passed, 1 = at least one failure, 2 = server problem.
 # =====================================================================
@@ -97,24 +97,13 @@ t() {
 # count_is ID DESCRIPTION ENTITY_SET FILTER EXPECTED_NUMBER
 count_is() {
   local id="$1" desc="$2" set="$3" filter="$4" exp="$5"
-  call - GET "${set}/\$count?\$filter=$(enc "$filter")"
+  call viewer GET "${set}/\$count?\$filter=$(enc "$filter")"
   if [ "$STATUS" = "200" ] && [ "$RESP" = "$exp" ]; then
     PASS=$((PASS + 1)); printf 'PASS  %-5s %s\n' "$id" "$desc"
   else
     FAIL=$((FAIL + 1)); FAILED_IDS+=("$id")
     printf 'FAIL  %-5s %s\n      expected: count %s\n      got:      HTTP %s, %s\n' \
       "$id" "$desc" "$exp" "$STATUS" "${RESP:0:300}"
-  fi
-}
-
-# gap ID DESCRIPTION USER METHOD PATH JSON INSECURE_STATUS   (not counted)
-gap() {
-  local id="$1" desc="$2" user="$3" method="$4" path="$5" data="$6" bad="$7"
-  call "$user" "$method" "$path" "$data"
-  if [ "$STATUS" = "$bad" ]; then
-    printf 'GAP   %-5s %s -> still OPEN (HTTP %s), fixed in Batch 2\n' "$id" "$desc" "$STATUS"
-  else
-    printf 'GAP   %-5s %s -> now blocked (HTTP %s)\n' "$id" "$desc" "$STATUS"
   fi
 }
 
@@ -140,67 +129,77 @@ risk_json() { # risk_id supplier tier confidence evidence [event]
 }
 
 # =====================================================================
-echo "== Group 1: option decisions, not logged in (previous regression) =="
+echo "== Group 1: option decisions, logged in (previous regression) =="
 start_server
-t 1.01 "Approve TO1 (180k) as claimed manager"       - POST approveOption '{"option_id":"TO1","approver_role":"procurement_manager","approved_by":"Asha"}' 200 '"status":"approved"'
-t 1.02 "Approve TO1 again"                            - POST approveOption '{"option_id":"TO1","approver_role":"procurement_manager","approved_by":"Asha"}' 409 'already been approved'
-t 1.03 "Reject TO1 after approval"                    - POST rejectOption  '{"option_id":"TO1","approver_role":"plant_owner","approved_by":"Ravi","reason":"x"}' 409 'already been approved'
-t 1.04 "Edit TO1 after approval"                      - POST editOption    '{"option_id":"TO1","cost_estimate":999999,"approved_by":"Asha"}' 409 'Finalised options'
-t 1.05 "Approve TO2 (250k) as claimed manager"        - POST approveOption '{"option_id":"TO2","approver_role":"procurement_manager","approved_by":"Asha"}' 200 '"status":"pending_owner"' '"success":false'
-t 1.06 "Approve unknown option"                       - POST approveOption '{"option_id":"NOPE","approver_role":"plant_owner","approved_by":"x"}' 404 'not found'
-t 1.07 "Approve without role/name (not logged in)"    - POST approveOption '{"option_id":"TO2"}' 400
-t 1.08 "Reject without reason"                        - POST rejectOption  '{"option_id":"TO2","approver_role":"plant_owner","approved_by":"x"}' 400
-t 1.09 "Edit with negative cost"                      - POST editOption    '{"option_id":"TO2","cost_estimate":-5,"approved_by":"x"}' 400
-t 1.10 "Edit with no fields"                          - POST editOption    '{"option_id":"TO2","approved_by":"x"}' 400
-t 1.11 "Edit without editor name (not logged in)"     - POST editOption    '{"option_id":"TO2","cost_estimate":5}' 400
-call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and status eq 'approved'")"
-check 1.12 "Audit: unauthenticated approval recorded as anonymous, not 'Asha'" 200 '"approved_by":"anonymous"' '"approver_role":null'
+t 1.01 "Manager approves TO1 (180k)"                  manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"approved"'
+t 1.02 "Approve TO1 again"                            manager POST approveOption '{"option_id":"TO1"}' 409 'already been approved'
+t 1.03 "Owner rejects approved TO1"                   owner   POST rejectOption  '{"option_id":"TO1","reason":"x"}' 409 'already been approved'
+t 1.04 "Edit TO1 after approval"                      manager POST editOption    '{"option_id":"TO1","cost_estimate":999999}' 409 'Finalised options'
+t 1.05 "Manager approves TO2 (250k)"                  manager POST approveOption '{"option_id":"TO2"}' 200 '"status":"pending_owner"' '"success":false'
+t 1.06 "Approve unknown option"                       owner   POST approveOption '{"option_id":"NOPE"}' 404 'not found'
+t 1.07 "Approve without option ID"                    manager POST approveOption '{}' 400 'Option ID is required'
+t 1.08 "Reject without reason"                        manager POST rejectOption  '{"option_id":"TO2"}' 400
+t 1.09 "Edit with negative cost"                      manager POST editOption    '{"option_id":"TO2","cost_estimate":-5}' 400
+t 1.10 "Edit with no fields"                          manager POST editOption    '{"option_id":"TO2"}' 400
+t 1.11 "Edit without the deprecated approved_by"      manager POST editOption    '{"option_id":"TO2","cost_estimate":260000}' 200 'still requires plant-owner'
+call viewer GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and status eq 'approved'")"
+check 1.12 "Audit: TO1 approval recorded as manager / procurement_manager" 200 '"approved_by":"manager"' '"approver_role":"procurement_manager"'
 
 # =====================================================================
 echo "== Group 2: threshold bypass fix (escalation is permanent) =="
 start_server
 t 2.01 "Manager approves TO2 (250k)"                  manager POST approveOption '{"option_id":"TO2"}' 200 '"status":"pending_owner"'
 t 2.02 "Manager edits TO2 cost down to 199,999"       manager POST editOption '{"option_id":"TO2","cost_estimate":199999}' 200 'still requires plant-owner'
-t 2.03 "TO2 is still pending_owner at 199,999"        - GET "Options('TO2')" '' 200 '"approval_status":"pending_owner"' '"cost_estimate":"199999.00"'
+t 2.03 "TO2 is still pending_owner at 199,999"        viewer GET "Options('TO2')" '' 200 '"approval_status":"pending_owner"' '"cost_estimate":"199999.00"'
 t 2.04 "Manager approves TO2 again"                   manager POST approveOption '{"option_id":"TO2"}' 200 '"status":"pending_owner"' '"success":false'
 count_is 2.05 "Only one pending_owner audit row for TO2" AuditLog "option_id eq 'TO2' and status eq 'pending_owner'" 1
 t 2.06 "Plant owner approves TO2"                     owner POST approveOption '{"option_id":"TO2"}' 200 '"status":"approved"'
-call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO2' and status eq 'approved'")"
+call viewer GET "AuditLog?\$filter=$(enc "option_id eq 'TO2' and status eq 'approved'")"
 check 2.07 "Audit: approval by owner / plant_owner" 200 '"approved_by":"owner"' '"approver_role":"plant_owner"'
 t 2.08 "Manager raises TO1 to 300,000 (was 180k)"     manager POST editOption '{"option_id":"TO1","cost_estimate":300000}' 200 'updated successfully'
 t 2.09 "Manager lowers TO1 to 150,000 before approval" manager POST editOption '{"option_id":"TO1","cost_estimate":150000}' 200 'still requires plant-owner'
-t 2.10 "TO1 became pending_owner"                     - GET "Options('TO1')" '' 200 '"approval_status":"pending_owner"'
+t 2.10 "TO1 became pending_owner"                     viewer GET "Options('TO1')" '' 200 '"approval_status":"pending_owner"'
 t 2.11 "Manager approves TO1"                         manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"pending_owner"' '"success":false'
 t 2.12 "Manager rejects escalated TO1 (Decision A)"   manager POST rejectOption '{"option_id":"TO1","reason":"Too costly"}' 200 '"status":"rejected"'
-call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and action eq 'reject'")"
+call viewer GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and action eq 'reject'")"
 check 2.13 "Audit: rejection by manager / procurement_manager" 200 '"approved_by":"manager"' '"approver_role":"procurement_manager"'
 
 start_server
 t 2.14 "Manager edits TO1 (never above threshold)"    manager POST editOption '{"option_id":"TO1","cost_estimate":170000}' 200 'updated successfully'
-t 2.15 "TO1 is pending"                               - GET "Options('TO1')" '' 200 '"approval_status":"pending"'
+t 2.15 "TO1 is pending"                               viewer GET "Options('TO1')" '' 200 '"approval_status":"pending"'
 t 2.16 "Manager approves TO1"                         manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"approved"'
-call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and action eq 'edit'")"
+call viewer GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and action eq 'edit'")"
 check 2.17 "Audit: edit by manager / procurement_manager" 200 '"approved_by":"manager"' '"approver_role":"procurement_manager"'
-t 2.18 "Unauthenticated edit claiming 'Asha'"         - POST editOption '{"option_id":"TO2","cost_estimate":260000,"approved_by":"Asha"}' 200
-call - GET "AuditLog?\$filter=$(enc "option_id eq 'TO2' and action eq 'edit'")"
-check 2.19 "Audit: recorded as anonymous / null role" 200 '"approved_by":"anonymous"' '"approver_role":null'
+t 2.18 "Manager edits TO2 claiming to be 'Asha'"      manager POST editOption '{"option_id":"TO2","cost_estimate":260000,"approved_by":"Asha"}' 200
+call viewer GET "AuditLog?\$filter=$(enc "option_id eq 'TO2' and action eq 'edit'")"
+check 2.19 "Audit: recorded as manager, not 'Asha'" 200 '"approved_by":"manager"' '"approver_role":"procurement_manager"'
 count_is 2.20 "No audit row claims to be 'Asha'" AuditLog "approved_by eq 'Asha'" 0
 
 # =====================================================================
-echo "== Group 3: roles =="
+echo "== Group 3: roles, and request-supplied identity is ignored =="
 start_server
 t 3.01 "Viewer approves TO1"                          viewer POST approveOption '{"option_id":"TO1"}' 403
 t 3.02 "Viewer rejects TO1"                           viewer POST rejectOption  '{"option_id":"TO1","reason":"x"}' 403
 t 3.03 "Viewer edits TO1"                             viewer POST editOption    '{"option_id":"TO1","cost_estimate":1}' 403
-t 3.04 "Manager claims plant_owner in request (TO2)"  manager POST approveOption '{"option_id":"TO2","approver_role":"plant_owner","approved_by":"Ravi"}' 200 '"status":"pending_owner"'
+t 3.04 "Manager claims plant_owner in request (TO2)"  manager POST approveOption '{"option_id":"TO2","approver_role":"plant_owner","approved_by":"Ravi"}' 200 '"status":"pending_owner"' '"success":false'
 count_is 3.05 "No audit rows written by viewer" AuditLog "approved_by eq 'viewer'" 0
-t 3.06 "TO1 untouched after viewer attempts"          - GET "Options('TO1')" '' 200 '"approval_status":"pending"' '"cost_estimate":"180000.00"'
+t 3.06 "TO1 untouched after viewer attempts"          viewer GET "Options('TO1')" '' 200 '"approval_status":"pending"' '"cost_estimate":"180000.00"'
+t 3.07 "Alice (no MediShield role) approves TO1"      alice  POST approveOption '{"option_id":"TO1","approver_role":"plant_owner","approved_by":"Ravi"}' 403
+t 3.08 "Viewer claims plant_owner in request"         viewer POST approveOption '{"option_id":"TO2","approver_role":"plant_owner","approved_by":"Ravi"}' 403
+t 3.09 "TO2 still pending_owner after spoof attempts" viewer GET "Options('TO2')" '' 200 '"approval_status":"pending_owner"'
+t 3.10 "Owner approves TO2 claiming procurement_manager/'Asha'" owner POST approveOption '{"option_id":"TO2","approver_role":"procurement_manager","approved_by":"Asha"}' 200 '"status":"approved"'
+call viewer GET "AuditLog?\$filter=$(enc "option_id eq 'TO2' and status eq 'approved'")"
+check 3.11 "Audit: approval recorded as owner / plant_owner" 200 '"approved_by":"owner"' '"approver_role":"plant_owner"'
+t 3.12 "Manager rejects TO1 claiming plant_owner/'Ravi'" manager POST rejectOption '{"option_id":"TO1","reason":"x","approver_role":"plant_owner","approved_by":"Ravi"}' 200 '"status":"rejected"'
+call viewer GET "AuditLog?\$filter=$(enc "option_id eq 'TO1' and action eq 'reject'")"
+check 3.13 "Audit: rejection recorded as manager / procurement_manager" 200 '"approved_by":"manager"' '"approver_role":"procurement_manager"'
+count_is 3.14 "No audit row claims 'Ravi' or 'Asha'" AuditLog "approved_by eq 'Ravi' or approved_by eq 'Asha'" 0
 
 # =====================================================================
 echo "== Group 4: createRisk validation =="
 start_server
 t 4.01 "Valid Tier-2 inferred/medium risk on S3"      manager POST createRisk "$(risk_json RA2 S3 2 medium inferred)" 200 '"status":"created"'
-call - GET "AuditLog?\$filter=$(enc "risk_id eq 'RA2' and action eq 'risk_detected'")"
+call viewer GET "AuditLog?\$filter=$(enc "risk_id eq 'RA2' and action eq 'risk_detected'")"
 check 4.02 "Audit: risk_detected by manager" 200 '"approved_by":"manager"'
 t 4.03 "Duplicate risk ID"                            manager POST createRisk "$(risk_json RA2 S3 2 medium inferred)" 409 'already exists'
 t 4.04 "Missing required field (source)"              manager POST createRisk '{"risk":{"risk_id":"RA3","event":"e","affected_supplier":"S3","tier":2,"confidence":"low","reason":"r","evidence_type":"news"}}' 400
@@ -214,7 +213,7 @@ t 4.11 "Tier 4"                                       manager POST createRisk "$
 t 4.12 "Declared/high Tier-2 risk on S3 is allowed"   manager POST createRisk "$(risk_json RB3 S3 2 high declared)" 200 '"status":"created"'
 t 4.13 "Tier-3 risk on S5"                            manager POST createRisk "$(risk_json RB4 S5 3 low news)" 200 '"status":"created"'
 t 4.14 "Event longer than 300 characters"             manager POST createRisk "$(risk_json RB5 S3 2 low news "$(printf 'x%.0s' $(seq 1 301))")" 400
-t 4.15 "Rejected risk RA4 was not stored"             - GET "Risks('RA4')" '' 404
+t 4.15 "Rejected risk RA4 was not stored"             viewer GET "Risks('RA4')" '' 404
 count_is 4.16 "No audit rows for rejected risks" AuditLog "risk_id eq 'RA4' or risk_id eq 'RA5' or risk_id eq 'RA8'" 0
 
 # =====================================================================
@@ -237,10 +236,10 @@ t 5.14 "Send M1"                                      manager POST sendSimulated
 t 5.15 "Send M1 again"                                manager POST sendSimulatedMessage '{"message_id":"M1"}' 409
 t 5.16 "Reply with empty text"                        manager POST recordSupplierReply '{"message_id":"M1","reply_text":"   "}' 400
 t 5.17 "Record reply to M1"                           manager POST recordSupplierReply '{"message_id":"M1","reply_text":"Partial shipment possible (simulated)"}' 200 '"status":"reply_received"'
-t 5.18 "M1 status is reply_received"                  - GET "Messages('M1')" '' 200 '"status":"reply_received"' 'Partial shipment possible'
+t 5.18 "M1 status is reply_received"                  viewer GET "Messages('M1')" '' 200 '"status":"reply_received"' 'Partial shipment possible'
 t 5.19 "Reply to M1 again"                            manager POST recordSupplierReply '{"message_id":"M1","reply_text":"again"}' 409 'already been recorded'
 t 5.20 "Send unknown message"                         manager POST sendSimulatedMessage '{"message_id":"NOPE"}' 404
-call - GET "AuditLog?\$filter=$(enc "action eq 'message_sent'")"
+call viewer GET "AuditLog?\$filter=$(enc "action eq 'message_sent'")"
 check 5.21 "Audit: message_sent by manager" 200 '"approved_by":"manager"' '"status":"sent_simulated"'
 
 # =====================================================================
@@ -268,23 +267,86 @@ check 6.07 "Two parallel rejections of TO1 -> one 200, one 409 (got: $PAR_CODES)
 count_is 6.08 "Exactly one reject audit row for TO1" AuditLog "option_id eq 'TO1' and action eq 'reject'" 1
 
 # =====================================================================
-echo "== Group 7: production safety net (production profile, local SQLite, mocked login) =="
+echo "== Group 7: production profile (local SQLite, mocked login; dev test users absent) =="
 CDS_CONFIG='{"requires":{"db":{"kind":"sqlite","credentials":{"url":":memory:"},"model":["db/schema.cds"]},"auth":{"kind":"mocked"}}}' \
   start_server --profile production
 t 7.01 "Unauthenticated approveOption in production"   - POST approveOption '{"option_id":"TO1","approver_role":"plant_owner","approved_by":"x"}' 401
 t 7.02 "Unauthenticated createRisk in production"      - POST createRisk "$(risk_json RA2 S3 2 medium inferred)" 401
 t 7.03 "Unauthenticated sendSimulatedMessage in prod." - POST sendSimulatedMessage '{"message_id":"M1"}' 401
-t 7.04 "TO1 unchanged"                                 - GET "Options('TO1')" '' 200 '"approval_status":"pending"'
-count_is 7.05 "No audit rows written" AuditLog "audit_id gt 0" 0
+t 7.04 "Unauthenticated read in production"            - GET Options '' 401
+t 7.05 "Logged in without role: approve in production" alice POST approveOption '{"option_id":"TO1"}' 403
+t 7.06 "TO1 unchanged"                                 alice GET "Options('TO1')" '' 200 '"approval_status":"pending"'
+call alice GET "AuditLog/\$count"
+check 7.07 "No audit rows written" 200
+[ "$RESP" = "0" ] || { PASS=$((PASS - 1)); FAIL=$((FAIL + 1)); FAILED_IDS+=("7.07"); echo "FAIL  7.07  audit count is $RESP, expected 0"; }
 
 # =====================================================================
-echo "== Known gaps (scheduled for Batch 2; not counted) =="
+echo "== Group 8: access matrix - 10 entities x GET/POST/PATCH/DELETE x 5 users =="
 start_server
-gap G1 "Direct PATCH of Options approval_status"  - PATCH "Options('TO2')" '{"approval_status":"approved"}' 200
-gap G2 "Direct POST of an already-'sent' message"  - POST Messages '{"message_id":"MX","risk_id":"RB1","to_supplier":"S2","status":"sent_simulated"}' 201
-gap G3 "Direct POST of a forged AuditLog row"     - POST AuditLog '{"audit_id":999,"risk_id":"RB1","action":"approve","status":"approved"}' 201
-gap G4 "Direct DELETE of an AuditLog row"         - DELETE "AuditLog(999)" '' 204
-gap G5 "Unauthenticated approval in development"  - POST approveOption '{"option_id":"TO1","approver_role":"procurement_manager","approved_by":"x"}' 200
+# Setup through authorised actions so that Messages and AuditLog have rows
+call manager POST createMessage '{"message_id":"M1","risk_id":"RB1","to_supplier":"S2","body":"x"}'
+check 8.00 "Setup: draft M1 (writes Messages + AuditLog through an action)" 200 '"status":"drafted"'
+call viewer GET "AuditLog/\$count"; AUDIT_BEFORE="$RESP"
+
+# entity | key path | body for POST | body for PATCH
+ENTITIES=(
+  "Suppliers|Suppliers('S1')|{\"supplier_id\":\"S9\",\"name\":\"x\",\"tier\":1}|{\"name\":\"HACKED\"}"
+  "Stock|Stock('Paracetamol%20API')|{\"material\":\"X\",\"unit\":\"kg\"}|{\"stock_units\":1}"
+  "SupplierDeclarations|SupplierDeclarations('D1')|{\"declaration_id\":\"D9\"}|{\"status\":\"x\"}"
+  "Risks|Risks('RB1')|{\"risk_id\":\"R9\",\"event\":\"x\"}|{\"event\":\"x\"}"
+  "Impacts|Impacts('RB1')|{\"risk_id\":\"R9\",\"delay_days\":1}|{\"delay_days\":1}"
+  "Options|Options('TO1')|{\"option_id\":\"T9\",\"risk_id\":\"RB1\"}|{\"approval_status\":\"approved\"}"
+  "Messages|Messages('M1')|{\"message_id\":\"M9\",\"status\":\"sent_simulated\"}|{\"status\":\"sent_simulated\"}"
+  "ApprovalRule|ApprovalRule('R1')|{\"rule_id\":\"R9\",\"threshold_cost\":1}|{\"threshold_cost\":999999999}"
+  "Simulation|Simulation('SIM1')|{\"sim_id\":\"SIM9\"}|{\"region\":\"x\"}"
+  "AuditLog|AuditLog(1)|{\"audit_id\":999,\"risk_id\":\"RB1\",\"action\":\"approve\",\"status\":\"approved\"}|{\"status\":\"forged\"}"
+)
+n=0
+for row in "${ENTITIES[@]}"; do
+  IFS='|' read -r ent key postbody patchbody <<< "$row"
+  for user in - viewer alice manager owner; do
+    label="${user/-/anonymous}"
+    exp_read=200; exp_write=405
+    [ "$user" = "-" ] && { exp_read=401; exp_write=401; }
+    n=$((n + 1)); t "8.$n" "GET    $ent as $label" "$user" GET "$ent" '' "$exp_read"
+    n=$((n + 1)); t "8.$n" "POST   $ent as $label" "$user" POST "$ent" "$postbody" "$exp_write"
+    n=$((n + 1)); t "8.$n" "PATCH  $key as $label" "$user" PATCH "$key" "$patchbody" "$exp_write"
+    n=$((n + 1)); t "8.$n" "DELETE $key as $label" "$user" DELETE "$key" '' "$exp_write"
+  done
+done
+
+echo "-- data unchanged after all direct write attempts --"
+t 8.300 "Supplier S1 unchanged"        viewer GET "Suppliers('S1')" '' 200 '"name":"Sharma Traders"'
+t 8.301 "Option TO1 still pending"     viewer GET "Options('TO1')" '' 200 '"approval_status":"pending"'
+t 8.302 "Approval threshold unchanged" viewer GET "ApprovalRule('R1')" '' 200 '"threshold_cost":"200000.00"'
+t 8.303 "Message M1 still drafted"     viewer GET "Messages('M1')" '' 200 '"status":"drafted"'
+t 8.304 "No supplier S9 created"       viewer GET "Suppliers('S9')" '' 404
+call viewer GET "AuditLog/\$count"
+STATUS=$([ "$RESP" = "$AUDIT_BEFORE" ] && echo 200 || echo "count $RESP vs $AUDIT_BEFORE")
+check 8.305 "AuditLog row count unchanged ($AUDIT_BEFORE)" 200
+t 8.306 "Audit row 1 not modified"     viewer GET "AuditLog(1)" '' 200 '"action":"message_created"'
+
+echo "== Group 9: all 7 actions x anonymous / viewer / alice =="
+ACTIONS=(
+  "createRisk|$(risk_json RA2 S3 2 medium inferred)"
+  "approveOption|{\"option_id\":\"TO1\",\"approver_role\":\"plant_owner\",\"approved_by\":\"x\"}"
+  "rejectOption|{\"option_id\":\"TO1\",\"reason\":\"x\",\"approver_role\":\"plant_owner\",\"approved_by\":\"x\"}"
+  "editOption|{\"option_id\":\"TO1\",\"cost_estimate\":1,\"approved_by\":\"x\"}"
+  "createMessage|{\"message_id\":\"M2\",\"risk_id\":\"RB1\",\"to_supplier\":\"S2\",\"body\":\"x\"}"
+  "sendSimulatedMessage|{\"message_id\":\"M1\"}"
+  "recordSupplierReply|{\"message_id\":\"M1\",\"reply_text\":\"x\"}"
+)
+n=0
+for row in "${ACTIONS[@]}"; do
+  IFS='|' read -r act body <<< "$row"
+  n=$((n + 1)); t "9.$n" "$act as anonymous" - POST "$act" "$body" 401
+  n=$((n + 1)); t "9.$n" "$act as viewer"    viewer POST "$act" "$body" 403
+  n=$((n + 1)); t "9.$n" "$act as alice"     alice  POST "$act" "$body" 403
+done
+call viewer GET "AuditLog/\$count"
+STATUS=$([ "$RESP" = "$AUDIT_BEFORE" ] && echo 200 || echo "count $RESP vs $AUDIT_BEFORE")
+check 9.90 "No audit rows written by refused action calls" 200
+t 9.91 "Risk RA2 was not created" viewer GET "Risks('RA2')" '' 404
 stop_server
 
 # =====================================================================

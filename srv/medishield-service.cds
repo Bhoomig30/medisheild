@@ -11,18 +11,26 @@ using {
     AuditLog as AuditLogEntity
 } from '../db/schema';
 
+// Authorisation (Batch 2):
+// - Every request needs a login (401 without one).
+// - All ten entities are read-only for every user (direct POST/PATCH/DELETE -> 405).
+//   Data changes only through the actions below; their handlers write internally.
+// - Actions need the procurement_manager or plant_owner role (403 otherwise).
+//   Business rules (e.g. plant-owner approval above the threshold) stay in
+//   medishield-service.js; these annotations are an additional layer.
+@requires: 'authenticated-user'
 service MediShieldService {
 
-    entity Suppliers as projection on SuppliersEntity;
-    entity Stock as projection on StockEntity;
-    entity SupplierDeclarations as projection on DeclarationsEntity;
-    entity Risks as projection on RisksEntity;
-    entity Impacts as projection on ImpactsEntity;
-    entity Options as projection on OptionsEntity;
-    entity Messages as projection on MessagesEntity;
-    entity ApprovalRule as projection on ApprovalRuleEntity;
-    entity Simulation as projection on SimulationEntity;
-    entity AuditLog as projection on AuditLogEntity;
+    @readonly entity Suppliers as projection on SuppliersEntity;
+    @readonly entity Stock as projection on StockEntity;
+    @readonly entity SupplierDeclarations as projection on DeclarationsEntity;
+    @readonly entity Risks as projection on RisksEntity;
+    @readonly entity Impacts as projection on ImpactsEntity;
+    @readonly entity Options as projection on OptionsEntity;
+    @readonly entity Messages as projection on MessagesEntity;
+    @readonly entity ApprovalRule as projection on ApprovalRuleEntity;
+    @readonly entity Simulation as projection on SimulationEntity;
+    @readonly entity AuditLog as projection on AuditLogEntity;
         type ActionResult {
         success   : Boolean;
         status    : String(30);
@@ -30,26 +38,29 @@ service MediShieldService {
         option_id : String(10);
     }
 
+    @requires: ['procurement_manager', 'plant_owner']
     action approveOption(
         option_id     : String(10),
-        approver_role : String(30),
-        approved_by   : String(50),
+        approver_role : String(30),   // DEPRECATED: ignored; role comes from the login
+        approved_by   : String(50),   // DEPRECATED: ignored; name comes from the login
         reason        : String(300)
     ) returns ActionResult;
 
+    @requires: ['procurement_manager', 'plant_owner']
     action rejectOption(
         option_id     : String(10),
-        approver_role : String(30),
-        approved_by   : String(50),
+        approver_role : String(30),   // DEPRECATED: ignored; role comes from the login
+        approved_by   : String(50),   // DEPRECATED: ignored; name comes from the login
         reason        : String(300)
     ) returns ActionResult;
 
+    @requires: ['procurement_manager', 'plant_owner']
     action editOption(
         option_id        : String(10),
         option_type      : String(30),
         cost_estimate    : Decimal(12,2),
         delay_saved_days : Integer,
-        approved_by      : String(50),
+        approved_by      : String(50),   // DEPRECATED: ignored; name comes from the login
         reason           : String(300)
     ) returns ActionResult;
 
@@ -72,6 +83,7 @@ service MediShieldService {
         message : String(300);
         risk_id : String(10);
     }
+    @requires: ['procurement_manager', 'plant_owner']
     action createRisk(
         risk : RiskInput
     ) returns RiskCreationResult;
@@ -84,6 +96,7 @@ service MediShieldService {
         message_id  : String(10);
     }
 
+    @requires: ['procurement_manager', 'plant_owner']
     action createMessage(
         message_id      : String(10),
         risk_id         : String(10),
@@ -93,10 +106,12 @@ service MediShieldService {
         body_translated : String(2000)
     ) returns MessageResult;
 
+    @requires: ['procurement_manager', 'plant_owner']
     action sendSimulatedMessage(
         message_id : String(10)
     ) returns MessageResult;
 
+    @requires: ['procurement_manager', 'plant_owner']
     action recordSupplierReply(
         message_id : String(10),
         reply_text : String(1000)
