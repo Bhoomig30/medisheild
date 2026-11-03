@@ -70,6 +70,7 @@ entity Options {
 entity Messages {
   key message_id      : String(10);
       risk_id         : String(10);
+      option_id       : String(10); // P4 addition (agreed with P2): the option this message communicates
       to_supplier     : String(10);
       body            : String(2000);
       language        : String(5);
@@ -98,6 +99,7 @@ entity AuditLog {
   key audit_id      : Integer;
       risk_id       : String(10);
       option_id     : String(10);
+      message_id    : String(10); // P4 addition (agreed with P2): the message this entry refers to
       action        : String(30);
       approver_role : String(30);
       approved_by   : String(50);

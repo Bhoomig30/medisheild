@@ -1,5 +1,6 @@
 
 import cds from '@sap/cds';
+import { randomInt } from 'node:crypto';
 import { writeAudit } from './lib/audit.js';
 
 const { SELECT, INSERT, UPDATE } = cds.ql;
@@ -14,9 +15,31 @@ const STATE_CHANGING_ACTIONS = [
     'rejectOption',
     'editOption',
     'createMessage',
+    'approveMessage',
+    'rejectMessage',
     'sendSimulatedMessage',
     'recordSupplierReply'
 ];
+
+// Database table for messages. The service entity 'Messages' is a read-only
+// join (it adds about_supplier), so handlers read and write the table itself.
+const MESSAGES_TABLE = 'Messages';
+
+const ID_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+/**
+ * Generates a 10-character ID: prefix letter + 9 random characters (agreed
+ * with P2/P3: O + 9 for options, M + 9 for messages). Checks uniqueness.
+ */
+async function generateId(tx, table, keyField, prefix) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+        let id = prefix;
+        for (let i = 0; i < 9; i++) id += ID_CHARS[randomInt(ID_CHARS.length)];
+        const clash = await tx.run(SELECT.one.from(table).columns(keyField).where({ [keyField]: id }));
+        if (!clash) return id;
+    }
+    throw new Error(`Could not generate a unique ${keyField}.`);
+}
 
 /**
  * Who is making this request?
@@ -44,8 +67,7 @@ export default class MediShieldService extends cds.ApplicationService {
             Options,
             ApprovalRule,
             Risks,
-            Suppliers,
-            Messages
+            Suppliers
         } = this.entities;
 
         // Second line of defence behind the @requires annotations in
@@ -554,16 +576,17 @@ export default class MediShieldService extends cds.ApplicationService {
         // --------------------------------------------------
         this.on('createMessage', async (req) => {
             const {
-                message_id,
                 risk_id,
+                option_id,
                 to_supplier,
                 body,
                 language,
                 body_translated
             } = req.data;
+            let { message_id } = req.data;   // optional since Batch 3a
 
-            if (!message_id || !risk_id || !to_supplier || !body) {
-                return req.reject(400, 'Message ID, risk ID, supplier ID and body are required.');
+            if (!risk_id || !option_id || !to_supplier || !body) {
+                return req.reject(400, 'Risk ID, option ID, supplier ID and body are required.');
             }
 
             if (body.length > 2000) {
@@ -576,12 +599,14 @@ export default class MediShieldService extends cds.ApplicationService {
 
             const tx = cds.tx(req);
 
-            const existing = await tx.run(
-                SELECT.one.from(Messages).where({ message_id })
-            );
+            if (message_id) {
+                const existing = await tx.run(
+                    SELECT.one.from(MESSAGES_TABLE).where({ message_id })
+                );
 
-            if (existing) {
-                return req.reject(409, 'Message ID already exists.');
+                if (existing) {
+                    return req.reject(409, 'Message ID already exists.');
+                }
             }
 
             const risk = await tx.run(
@@ -635,10 +660,36 @@ export default class MediShieldService extends cds.ApplicationService {
                 );
             }
 
+            // The message must be linked to a recovery option of the same risk
+            // that has not been rejected (decision G).
+            const option = await tx.run(
+                SELECT.one.from(Options).where({ option_id })
+            );
+
+            if (!option) {
+                return req.reject(404, 'Recovery option not found.');
+            }
+
+            if (option.risk_id !== risk_id) {
+                return req.reject(
+                    400,
+                    `Option ${option_id} belongs to risk ${option.risk_id}, not ${risk_id}.`
+                );
+            }
+
+            if (option.approval_status === 'rejected') {
+                return req.reject(409, 'A message cannot be linked to a rejected option.');
+            }
+
+            if (!message_id) {
+                message_id = await generateId(tx, MESSAGES_TABLE, 'message_id', 'M');
+            }
+
             await tx.run(
-                INSERT.into(Messages).entries({
+                INSERT.into(MESSAGES_TABLE).entries({
                     message_id,
                     risk_id,
+                    option_id,
                     to_supplier,
                     body,
                     language: language || 'en',
@@ -653,6 +704,8 @@ export default class MediShieldService extends cds.ApplicationService {
 
             await writeAudit(tx, {
                 risk_id,
+                option_id,
+                message_id,
                 action: 'message_created',
                 approver_role: actor.role,
                 approved_by: actor.name,
@@ -664,7 +717,143 @@ export default class MediShieldService extends cds.ApplicationService {
                 success: true,
                 status: 'drafted',
                 message: 'Supplier message draft created and audited.',
-                message_id
+                message_id,
+                option_id
+            };
+        });
+
+
+        // --------------------------------------------------
+        // 5a. APPROVE SUPPLIER MESSAGE (Batch 3a)
+        // --------------------------------------------------
+        this.on('approveMessage', async (req) => {
+            const { message_id, reason } = req.data;
+
+            if (!message_id) {
+                return req.reject(400, 'Message ID is required.');
+            }
+
+            const tx = cds.tx(req);
+
+            const message = await tx.run(
+                SELECT.one.from(MESSAGES_TABLE).where({ message_id })
+            );
+
+            if (!message) {
+                return req.reject(404, 'Message not found.');
+            }
+
+            if (message.status !== 'drafted') {
+                return req.reject(
+                    409,
+                    `Only drafted messages can be approved. This message is ${message.status}.`
+                );
+            }
+
+            // The message's OWN option must be approved (not any option of the risk)
+            const option = message.option_id && await tx.run(
+                SELECT.one.from(Options).where({ option_id: message.option_id })
+            );
+
+            if (!option || option.approval_status !== 'approved') {
+                return req.reject(
+                    409,
+                    `Approve the linked recovery option ${message.option_id || '(none)'} before approving this message.`
+                );
+            }
+
+            // Conditional update: only if the message is still a draft
+            const changed = await tx.run(
+                UPDATE(MESSAGES_TABLE)
+                    .set({ status: 'approved' })
+                    .where({ message_id, status: 'drafted' })
+            );
+
+            if (changed !== 1) {
+                return req.reject(409, 'This message was changed by another request. Reload and try again.');
+            }
+
+            const actor = getActor(req);
+
+            await writeAudit(tx, {
+                risk_id: message.risk_id,
+                option_id: message.option_id,
+                message_id,
+                action: 'message_approved',
+                approver_role: actor.role,
+                approved_by: actor.name,
+                reason: reason || `Message ${message_id} approved for simulated sending`,
+                status: 'approved'
+            });
+
+            return {
+                success: true,
+                status: 'approved',
+                message: 'Supplier message approved. It can now be sent (simulated).',
+                message_id,
+                option_id: message.option_id
+            };
+        });
+
+
+        // --------------------------------------------------
+        // 5b. REJECT SUPPLIER MESSAGE (Batch 3a)
+        // --------------------------------------------------
+        this.on('rejectMessage', async (req) => {
+            const { message_id, reason } = req.data;
+
+            if (!message_id || !reason || !reason.trim()) {
+                return req.reject(400, 'Message ID and rejection reason are required.');
+            }
+
+            const tx = cds.tx(req);
+
+            const message = await tx.run(
+                SELECT.one.from(MESSAGES_TABLE).where({ message_id })
+            );
+
+            if (!message) {
+                return req.reject(404, 'Message not found.');
+            }
+
+            if (message.status !== 'drafted') {
+                return req.reject(
+                    409,
+                    `Only drafted messages can be rejected. This message is ${message.status}.`
+                );
+            }
+
+            // Conditional update. A rejected message is final (decision I):
+            // a corrected message needs a new draft with a new ID.
+            const changed = await tx.run(
+                UPDATE(MESSAGES_TABLE)
+                    .set({ status: 'rejected' })
+                    .where({ message_id, status: 'drafted' })
+            );
+
+            if (changed !== 1) {
+                return req.reject(409, 'This message was changed by another request. Reload and try again.');
+            }
+
+            const actor = getActor(req);
+
+            await writeAudit(tx, {
+                risk_id: message.risk_id,
+                option_id: message.option_id,
+                message_id,
+                action: 'message_rejected',
+                approver_role: actor.role,
+                approved_by: actor.name,
+                reason: reason.trim(),
+                status: 'rejected'
+            });
+
+            return {
+                success: true,
+                status: 'rejected',
+                message: 'Supplier message rejected and recorded. Create a new draft to correct it.',
+                message_id,
+                option_id: message.option_id
             };
         });
 
@@ -682,46 +871,49 @@ export default class MediShieldService extends cds.ApplicationService {
             const tx = cds.tx(req);
 
             const message = await tx.run(
-                SELECT.one.from(Messages).where({ message_id })
+                SELECT.one.from(MESSAGES_TABLE).where({ message_id })
             );
 
             if (!message) {
                 return req.reject(404, 'Message not found.');
             }
 
-            if (message.status !== 'drafted') {
+            // Since Batch 3a a message must be approved by a human before sending
+            if (message.status === 'drafted') {
+                return req.reject(409, 'Approve the message before sending it.');
+            }
+
+            if (message.status !== 'approved') {
                 return req.reject(
                     409,
-                    'Only drafted messages can be sent. Duplicate sending is not allowed.'
+                    `Only approved messages can be sent. This message is ${message.status}; duplicate sending is not allowed.`
                 );
             }
 
-            // Sending requires at least one approved recovery option.
-            const approvedOption = await tx.run(
-                SELECT.one.from(Options).where({
-                    risk_id: message.risk_id,
-                    approval_status: 'approved'
-                })
+            // Sending requires the message's OWN linked option to be approved
+            // (previously: any approved option of the same risk).
+            const option = message.option_id && await tx.run(
+                SELECT.one.from(Options).where({ option_id: message.option_id })
             );
 
-            if (!approvedOption) {
+            if (!option || option.approval_status !== 'approved') {
                 return req.reject(
                     409,
-                    'Approve a recovery option before sending the supplier message.'
+                    `The linked recovery option ${message.option_id || '(none)'} is not approved.`
                 );
             }
 
-            // Conditional update: only if the message is still a draft
+            // Conditional update: only if the message is still approved (not yet sent)
             const changed = await tx.run(
-                UPDATE(Messages)
+                UPDATE(MESSAGES_TABLE)
                     .set({ status: 'sent_simulated' })
-                    .where({ message_id, status: 'drafted' })
+                    .where({ message_id, status: 'approved' })
             );
 
             if (changed !== 1) {
                 return req.reject(
                     409,
-                    'Only drafted messages can be sent. Duplicate sending is not allowed.'
+                    'Only approved messages can be sent. Duplicate sending is not allowed.'
                 );
             }
 
@@ -729,6 +921,8 @@ export default class MediShieldService extends cds.ApplicationService {
 
             await writeAudit(tx, {
                 risk_id: message.risk_id,
+                option_id: message.option_id,
+                message_id,
                 action: 'message_sent',
                 approver_role: actor.role,
                 approved_by: actor.name,
@@ -740,7 +934,8 @@ export default class MediShieldService extends cds.ApplicationService {
                 success: true,
                 status: 'sent_simulated',
                 message: 'Supplier message simulated successfully. No real message was sent.',
-                message_id
+                message_id,
+                option_id: message.option_id
             };
         });
 
@@ -762,7 +957,7 @@ export default class MediShieldService extends cds.ApplicationService {
             const tx = cds.tx(req);
 
             const message = await tx.run(
-                SELECT.one.from(Messages).where({ message_id })
+                SELECT.one.from(MESSAGES_TABLE).where({ message_id })
             );
 
             if (!message) {
@@ -787,7 +982,7 @@ export default class MediShieldService extends cds.ApplicationService {
             // Conditional update: only if still sent and not yet replied to.
             // Recording the reply also moves the message to reply_received.
             const changed = await tx.run(
-                UPDATE(Messages)
+                UPDATE(MESSAGES_TABLE)
                     .set({
                         status: 'reply_received',
                         reply_text: reply_text.trim(),
@@ -804,6 +999,8 @@ export default class MediShieldService extends cds.ApplicationService {
 
             await writeAudit(tx, {
                 risk_id: message.risk_id,
+                option_id: message.option_id,
+                message_id,
                 action: 'supplier_reply',
                 approver_role: actor.role,
                 approved_by: actor.name,
@@ -815,7 +1012,8 @@ export default class MediShieldService extends cds.ApplicationService {
                 success: true,
                 status: 'reply_received',
                 message: 'Supplier reply recorded and audited.',
-                message_id
+                message_id,
+                option_id: message.option_id
             };
         });
 

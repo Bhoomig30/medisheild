@@ -12,6 +12,7 @@ export async function writeAudit(tx, entry) {
     const {
         risk_id,
         option_id = null,
+        message_id = null,
         action,
         approver_role = null,
         approved_by = null,
@@ -29,6 +30,7 @@ export async function writeAudit(tx, entry) {
         INSERT.into('AuditLog').entries({
             risk_id,
             option_id,
+            message_id,
             action,
             approver_role,
             approved_by,

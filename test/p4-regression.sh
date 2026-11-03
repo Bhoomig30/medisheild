@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =====================================================================
-# MediShield P4 - regression tests (up to and including Batch 2)
+# MediShield P4 - regression tests (up to and including Batch 3a)
 #
 # Run from the project root (the folder that contains package.json):
 #     bash test/p4-regression.sh
@@ -217,30 +217,35 @@ t 4.15 "Rejected risk RA4 was not stored"             viewer GET "Risks('RA4')" 
 count_is 4.16 "No audit rows for rejected risks" AuditLog "risk_id eq 'RA4' or risk_id eq 'RA5' or risk_id eq 'RA8'" 0
 
 # =====================================================================
-echo "== Group 5: supplier messages =="
+echo "== Group 5: supplier messages (lifecycle since Batch 3a) =="
 start_server
-t 5.01 "Draft M1 for RB1 to Tier-1 S2"                manager POST createMessage '{"message_id":"M1","risk_id":"RB1","to_supplier":"S2","body":"Please confirm revised date (simulated)"}' 200 '"status":"drafted"'
-t 5.02 "Duplicate message ID M1"                      manager POST createMessage '{"message_id":"M1","risk_id":"RB1","to_supplier":"S2","body":"x"}' 409
+t 5.01 "Draft M1 for RB1 / option TO1 to Tier-1 S2"   manager POST createMessage '{"message_id":"M1","risk_id":"RB1","option_id":"TO1","to_supplier":"S2","body":"Please confirm revised date (simulated)"}' 200 '"status":"drafted"' '"option_id":"TO1"'
+t 5.02 "Duplicate message ID M1"                      manager POST createMessage '{"message_id":"M1","risk_id":"RB1","option_id":"TO1","to_supplier":"S2","body":"x"}' 409
 t 5.03 "Create Tier-2 risk RA2 on S3 (setup)"         manager POST createRisk "$(risk_json RA2 S3 2 medium inferred)" 200
-t 5.04 "Draft directly to Tier-2 S3 (bypass Tier-1)"  manager POST createMessage '{"message_id":"M2","risk_id":"RA2","to_supplier":"S3","body":"x"}' 400 'routed through Tier-1 supplier S1'
-t 5.05 "Draft to the wrong Tier-1 (S2 instead of S1)" manager POST createMessage '{"message_id":"M2","risk_id":"RA2","to_supplier":"S2","body":"x"}' 400 'routed through Tier-1 supplier S1'
-t 5.06 "Draft M2 for RA2 to S1"                       manager POST createMessage '{"message_id":"M2","risk_id":"RA2","to_supplier":"S1","body":"x"}' 200
-t 5.07 "Draft for unknown risk"                       manager POST createMessage '{"message_id":"M3","risk_id":"NORISK","to_supplier":"S1","body":"x"}' 404
-t 5.08 "Draft without body"                           manager POST createMessage '{"message_id":"M3","risk_id":"RB1","to_supplier":"S2"}' 400
-t 5.09 "Draft with language 'fr'"                     manager POST createMessage '{"message_id":"M3","risk_id":"RB1","to_supplier":"S2","body":"x","language":"fr"}' 400
-t 5.10 "Message ID longer than 10 characters"         manager POST createMessage '{"message_id":"M123456789012","risk_id":"RB1","to_supplier":"S2","body":"x"}' 400
-t 5.11 "Send M2 without any approved option"          manager POST sendSimulatedMessage '{"message_id":"M2"}' 409 'Approve a recovery option'
-t 5.12 "Reply to M1 before sending"                   manager POST recordSupplierReply '{"message_id":"M1","reply_text":"ok"}' 409 'after simulated sending'
-t 5.13 "Approve TO1 for RB1 (setup)"                  manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"approved"'
-t 5.14 "Send M1"                                      manager POST sendSimulatedMessage '{"message_id":"M1"}' 200 '"status":"sent_simulated"' 'No real message was sent'
-t 5.15 "Send M1 again"                                manager POST sendSimulatedMessage '{"message_id":"M1"}' 409
-t 5.16 "Reply with empty text"                        manager POST recordSupplierReply '{"message_id":"M1","reply_text":"   "}' 400
-t 5.17 "Record reply to M1"                           manager POST recordSupplierReply '{"message_id":"M1","reply_text":"Partial shipment possible (simulated)"}' 200 '"status":"reply_received"'
-t 5.18 "M1 status is reply_received"                  viewer GET "Messages('M1')" '' 200 '"status":"reply_received"' 'Partial shipment possible'
-t 5.19 "Reply to M1 again"                            manager POST recordSupplierReply '{"message_id":"M1","reply_text":"again"}' 409 'already been recorded'
-t 5.20 "Send unknown message"                         manager POST sendSimulatedMessage '{"message_id":"NOPE"}' 404
+t 5.04 "Draft directly to Tier-2 S3 (bypass Tier-1)"  manager POST createMessage '{"message_id":"M2","risk_id":"RA2","option_id":"TO1","to_supplier":"S3","body":"x"}' 400 'routed through Tier-1 supplier S1'
+t 5.05 "Draft to the wrong Tier-1 (S2 instead of S1)" manager POST createMessage '{"message_id":"M2","risk_id":"RA2","option_id":"TO1","to_supplier":"S2","body":"x"}' 400 'routed through Tier-1 supplier S1'
+t 5.06 "Draft linking an option of another risk"      manager POST createMessage '{"message_id":"M2","risk_id":"RA2","option_id":"TO1","to_supplier":"S1","body":"x"}' 400 'belongs to risk RB1'
+t 5.07 "Draft for unknown risk"                       manager POST createMessage '{"message_id":"M3","risk_id":"NORISK","option_id":"TO1","to_supplier":"S1","body":"x"}' 404
+t 5.08 "Draft without body"                           manager POST createMessage '{"message_id":"M3","risk_id":"RB1","option_id":"TO1","to_supplier":"S2"}' 400
+t 5.09 "Draft with language 'fr'"                     manager POST createMessage '{"message_id":"M3","risk_id":"RB1","option_id":"TO1","to_supplier":"S2","body":"x","language":"fr"}' 400
+t 5.10 "Message ID longer than 10 characters"         manager POST createMessage '{"message_id":"M123456789012","risk_id":"RB1","option_id":"TO1","to_supplier":"S2","body":"x"}' 400
+t 5.11 "Draft without option_id"                      manager POST createMessage '{"message_id":"M3","risk_id":"RB1","to_supplier":"S2","body":"x"}' 400 'option ID'
+t 5.12 "Draft linking an unknown option"              manager POST createMessage '{"message_id":"M3","risk_id":"RB1","option_id":"NOPE","to_supplier":"S2","body":"x"}' 404 'option not found'
+t 5.13 "Reply to M1 before sending"                   manager POST recordSupplierReply '{"message_id":"M1","reply_text":"ok"}' 409 'after simulated sending'
+t 5.14 "Send drafted M1 (not approved)"               manager POST sendSimulatedMessage '{"message_id":"M1"}' 409 'Approve the message before sending'
+t 5.15 "Approve M1 while its option TO1 is pending"   manager POST approveMessage '{"message_id":"M1"}' 409 'Approve the linked recovery option TO1'
+t 5.16 "Approve option TO1 (setup)"                   manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"approved"'
+t 5.17 "Approve message M1"                           manager POST approveMessage '{"message_id":"M1"}' 200 '"status":"approved"' '"option_id":"TO1"'
+t 5.18 "Send M1"                                      manager POST sendSimulatedMessage '{"message_id":"M1"}' 200 '"status":"sent_simulated"' 'No real message was sent'
+t 5.19 "Send M1 again"                                manager POST sendSimulatedMessage '{"message_id":"M1"}' 409
+t 5.20 "Reply with empty text"                        manager POST recordSupplierReply '{"message_id":"M1","reply_text":"   "}' 400
+t 5.21 "Record reply to M1"                           manager POST recordSupplierReply '{"message_id":"M1","reply_text":"Partial shipment possible (simulated)"}' 200 '"status":"reply_received"'
+t 5.22 "M1: reply_received, option TO1, about S2"     viewer GET "Messages('M1')" '' 200 '"status":"reply_received"' 'Partial shipment possible' '"option_id":"TO1"' '"about_supplier":"S2"'
+t 5.23 "Reply to M1 again"                            manager POST recordSupplierReply '{"message_id":"M1","reply_text":"again"}' 409 'already been recorded'
+t 5.24 "Send unknown message"                         manager POST sendSimulatedMessage '{"message_id":"NOPE"}' 404
 call viewer GET "AuditLog?\$filter=$(enc "action eq 'message_sent'")"
-check 5.21 "Audit: message_sent by manager" 200 '"approved_by":"manager"' '"status":"sent_simulated"'
+check 5.25 "Audit: message_sent by manager with message_id and option_id" 200 '"approved_by":"manager"' '"message_id":"M1"' '"option_id":"TO1"'
+count_is 5.26 "Audit rows for M1: created, approved, sent, reply" AuditLog "message_id eq 'M1'" 4
 
 # =====================================================================
 echo "== Group 6: concurrency (two identical requests at the same time) =="
@@ -252,7 +257,11 @@ parallel_twice owner approveOption '{"option_id":"TO2"}'
 STATUS=$([ "$PAR_CODES" = "200 409" ] && echo ok || echo "$PAR_CODES"); RESP=""
 check 6.01 "Two parallel owner approvals of TO2 -> one 200, one 409 (got: $PAR_CODES)" ok
 count_is 6.02 "Exactly one approval audit row for TO2" AuditLog "option_id eq 'TO2' and status eq 'approved'" 1
-call manager POST createMessage '{"message_id":"M1","risk_id":"RB1","to_supplier":"S2","body":"x"}'
+call manager POST createMessage '{"message_id":"M1","risk_id":"RB1","option_id":"TO2","to_supplier":"S2","body":"x"}'
+parallel_twice manager approveMessage '{"message_id":"M1"}'
+STATUS=$([ "$PAR_CODES" = "200 409" ] && echo ok || echo "$PAR_CODES"); RESP=""
+check 6.09 "Two parallel approvals of message M1 -> one 200, one 409 (got: $PAR_CODES)" ok
+count_is 6.10 "Exactly one message_approved audit row" AuditLog "action eq 'message_approved'" 1
 parallel_twice manager sendSimulatedMessage '{"message_id":"M1"}'
 STATUS=$([ "$PAR_CODES" = "200 409" ] && echo ok || echo "$PAR_CODES"); RESP=""
 check 6.03 "Two parallel sends of M1 -> one 200, one 409 (got: $PAR_CODES)" ok
@@ -284,7 +293,7 @@ check 7.07 "No audit rows written" 200
 echo "== Group 8: access matrix - 10 entities x GET/POST/PATCH/DELETE x 5 users =="
 start_server
 # Setup through authorised actions so that Messages and AuditLog have rows
-call manager POST createMessage '{"message_id":"M1","risk_id":"RB1","to_supplier":"S2","body":"x"}'
+call manager POST createMessage '{"message_id":"M1","risk_id":"RB1","option_id":"TO1","to_supplier":"S2","body":"x"}'
 check 8.00 "Setup: draft M1 (writes Messages + AuditLog through an action)" 200 '"status":"drafted"'
 call viewer GET "AuditLog/\$count"; AUDIT_BEFORE="$RESP"
 
@@ -326,13 +335,15 @@ STATUS=$([ "$RESP" = "$AUDIT_BEFORE" ] && echo 200 || echo "count $RESP vs $AUDI
 check 8.305 "AuditLog row count unchanged ($AUDIT_BEFORE)" 200
 t 8.306 "Audit row 1 not modified"     viewer GET "AuditLog(1)" '' 200 '"action":"message_created"'
 
-echo "== Group 9: all 7 actions x anonymous / viewer / alice =="
+echo "== Group 9: all 9 actions x anonymous / viewer / alice =="
 ACTIONS=(
   "createRisk|$(risk_json RA2 S3 2 medium inferred)"
   "approveOption|{\"option_id\":\"TO1\",\"approver_role\":\"plant_owner\",\"approved_by\":\"x\"}"
   "rejectOption|{\"option_id\":\"TO1\",\"reason\":\"x\",\"approver_role\":\"plant_owner\",\"approved_by\":\"x\"}"
   "editOption|{\"option_id\":\"TO1\",\"cost_estimate\":1,\"approved_by\":\"x\"}"
-  "createMessage|{\"message_id\":\"M2\",\"risk_id\":\"RB1\",\"to_supplier\":\"S2\",\"body\":\"x\"}"
+  "createMessage|{\"message_id\":\"M2\",\"risk_id\":\"RB1\",\"option_id\":\"TO1\",\"to_supplier\":\"S2\",\"body\":\"x\"}"
+  "approveMessage|{\"message_id\":\"M1\"}"
+  "rejectMessage|{\"message_id\":\"M1\",\"reason\":\"x\"}"
   "sendSimulatedMessage|{\"message_id\":\"M1\"}"
   "recordSupplierReply|{\"message_id\":\"M1\",\"reply_text\":\"x\"}"
 )
@@ -347,6 +358,44 @@ call viewer GET "AuditLog/\$count"
 STATUS=$([ "$RESP" = "$AUDIT_BEFORE" ] && echo 200 || echo "count $RESP vs $AUDIT_BEFORE")
 check 9.90 "No audit rows written by refused action calls" 200
 t 9.91 "Risk RA2 was not created" viewer GET "Risks('RA2')" '' 404
+t 9.92 "Message M1 still drafted" viewer GET "Messages('M1')" '' 200 '"status":"drafted"'
+t 9.93 "Message M2 was not created" viewer GET "Messages('M2')" '' 404
+stop_server
+
+# =====================================================================
+echo "== Group 10: message approval, own-option check, rejection, generated IDs (Batch 3a) =="
+start_server
+call manager POST createMessage '{"risk_id":"RB1","option_id":"TO2","to_supplier":"S2","body":"Draft for TO2 (simulated)"}'
+check 10.01 "Draft without message_id -> ID generated" 200 '"status":"drafted"' '"option_id":"TO2"'
+GEN=$(grep -o '"message_id":"[^"]*"' <<< "$RESP" | cut -d'"' -f4)
+STATUS=$([[ "$GEN" =~ ^M[0-9A-Z]{9}$ ]] && echo 200 || echo "bad id '$GEN'"); RESP=""
+check 10.02 "Generated ID is M + 9 characters ($GEN)" 200
+t 10.03 "Generated message readable, about_supplier S2"  viewer GET "Messages('$GEN')" '' 200 '"option_id":"TO2"' '"about_supplier":"S2"' '"status":"drafted"'
+t 10.04 "Approve option TO1 (another option of RB1)"     manager POST approveOption '{"option_id":"TO1"}' 200 '"status":"approved"'
+t 10.05 "Approve message linked to pending TO2 (issue #6)" manager POST approveMessage "{\"message_id\":\"$GEN\"}" 409 'TO2'
+t 10.06 "Manager escalates TO2 (250k) -> pending_owner"  manager POST approveOption '{"option_id":"TO2"}' 200 '"status":"pending_owner"'
+t 10.07 "Approve message while TO2 is pending_owner"     manager POST approveMessage "{\"message_id\":\"$GEN\"}" 409 'TO2'
+t 10.08 "Reject message without reason"                  manager POST rejectMessage "{\"message_id\":\"$GEN\"}" 400 'reason'
+t 10.09 "Reject message"                                 manager POST rejectMessage "{\"message_id\":\"$GEN\",\"reason\":\"Wording unclear\"}" 200 '"status":"rejected"'
+t 10.10 "Approve a rejected message"                     owner   POST approveMessage "{\"message_id\":\"$GEN\"}" 409 'rejected'
+t 10.11 "Send a rejected message"                        manager POST sendSimulatedMessage "{\"message_id\":\"$GEN\"}" 409 'rejected'
+t 10.12 "Reject it again"                                manager POST rejectMessage "{\"message_id\":\"$GEN\",\"reason\":\"x\"}" 409
+t 10.13 "Re-use the rejected message ID (decision I)"    manager POST createMessage "{\"message_id\":\"$GEN\",\"risk_id\":\"RB1\",\"option_id\":\"TO2\",\"to_supplier\":\"S2\",\"body\":\"x\"}" 409 'already exists'
+call viewer GET "AuditLog?\$filter=$(enc "action eq 'message_rejected'")"
+check 10.14 "Audit: message_rejected with reason, actor, IDs" 200 '"approved_by":"manager"' "\"message_id\":\"$GEN\"" '"option_id":"TO2"' 'Wording unclear'
+t 10.15 "Draft M5 for approved TO1"                      manager POST createMessage '{"message_id":"M5","risk_id":"RB1","option_id":"TO1","to_supplier":"S2","body":"x"}' 200
+t 10.16 "Owner approves M5"                              owner   POST approveMessage '{"message_id":"M5","reason":"OK to send"}' 200 '"status":"approved"'
+call viewer GET "AuditLog?\$filter=$(enc "action eq 'message_approved'")"
+check 10.17 "Audit: message_approved by owner / plant_owner" 200 '"approved_by":"owner"' '"approver_role":"plant_owner"' '"message_id":"M5"' 'OK to send'
+t 10.18 "Reject an approved message"                     manager POST rejectMessage '{"message_id":"M5","reason":"x"}' 409 'Only drafted'
+t 10.19 "Approve M5 again"                               manager POST approveMessage '{"message_id":"M5"}' 409
+t 10.20 "Approve unknown message"                        manager POST approveMessage '{"message_id":"NOPE"}' 404
+t 10.21 "Approve without message ID"                     manager POST approveMessage '{}' 400
+t 10.22 "Manager rejects option TO2 (Decision A)"        manager POST rejectOption '{"option_id":"TO2","reason":"Too costly"}' 200 '"status":"rejected"'
+t 10.23 "Draft linking rejected option TO2"              manager POST createMessage '{"message_id":"M6","risk_id":"RB1","option_id":"TO2","to_supplier":"S2","body":"x"}' 409 'rejected option'
+call viewer GET "Messages?\$filter=$(enc "about_supplier eq 'S2'")&\$select=message_id"
+check 10.24 "Filter Messages by about_supplier" 200 '"message_id":"M5"'
+count_is 10.25 "Audit rows linked to M5: created, approved" AuditLog "message_id eq 'M5'" 2
 stop_server
 
 # =====================================================================

@@ -27,7 +27,22 @@ service MediShieldService {
     @readonly entity Risks as projection on RisksEntity;
     @readonly entity Impacts as projection on ImpactsEntity;
     @readonly entity Options as projection on OptionsEntity;
-    @readonly entity Messages as projection on MessagesEntity;
+    // Messages plus about_supplier: the Tier-2/3 (or Tier-1) supplier the message
+    // is about, derived from the linked Risk. Not stored, so it cannot drift.
+    @readonly entity Messages as select from MessagesEntity as m
+        left join RisksEntity as r on m.risk_id = r.risk_id {
+            key m.message_id,
+                m.risk_id,
+                m.option_id,
+                m.to_supplier,
+                r.affected_supplier as about_supplier : String(10),
+                m.body,
+                m.language,
+                m.body_translated,
+                m.status,
+                m.reply_text,
+                m.reply_timestamp
+        };
     @readonly entity ApprovalRule as projection on ApprovalRuleEntity;
     @readonly entity Simulation as projection on SimulationEntity;
     @readonly entity AuditLog as projection on AuditLogEntity;
@@ -94,16 +109,31 @@ service MediShieldService {
         status      : String(30);
         message     : String(300);
         message_id  : String(10);
+        option_id   : String(10);   // Batch 3a (added field)
     }
 
     @requires: ['procurement_manager', 'plant_owner']
     action createMessage(
-        message_id      : String(10),
+        message_id      : String(10),   // optional since Batch 3a: generated as M + 9 characters if omitted
         risk_id         : String(10),
+        option_id       : String(10),   // required since Batch 3a: the recovery option this message communicates
         to_supplier     : String(10),
         body            : String(2000),
         language        : String(5),
         body_translated : String(2000)
+    ) returns MessageResult;
+
+    // Batch 3a: human decision on a drafted message
+    @requires: ['procurement_manager', 'plant_owner']
+    action approveMessage(
+        message_id : String(10),
+        reason     : String(300)
+    ) returns MessageResult;
+
+    @requires: ['procurement_manager', 'plant_owner']
+    action rejectMessage(
+        message_id : String(10),
+        reason     : String(300)        // required
     ) returns MessageResult;
 
     @requires: ['procurement_manager', 'plant_owner']
