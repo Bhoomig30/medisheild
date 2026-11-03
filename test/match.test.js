@@ -121,3 +121,72 @@ test('gemini: retries once on bad JSON then succeeds', async () => {
   const restore = mockFetch(async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: n++ === 0 ? 'oops' : '{"is_disruption":false}' }] } }] }) }));
   try { const f = await extractWithLLM('x', suppliers); assert.equal(f.is_disruption, false); assert.equal(n, 2); } finally { restore(); }
 });
+test('declaration matching uses material when multiple suppliers share a region', () => {
+  const facts = {
+    is_disruption: true,
+    event: 'API shortage',
+    region: 'Zhejiang',
+    supplier_name: null,
+    material_hint: 'Paracetamol API'
+  };
+
+  const declarations = [
+    {
+      declaration_id: 'D1',
+      tier1_supplier: 'S1',
+      upstream_name: 'Zhejiang API Works',
+      upstream_region: 'Zhejiang',
+      material: 'Paracetamol API',
+      share_percent: 60,
+      status: 'submitted'
+    },
+    {
+      declaration_id: 'D2',
+      tier1_supplier: 'S2',
+      upstream_name: 'Other Chemical Works',
+      upstream_region: 'Zhejiang',
+      material: 'Raw chemical input',
+      share_percent: 40,
+      status: 'submitted'
+    }
+  ];
+
+  const { risk } = decide(facts, 'News', suppliers, declarations);
+
+  assert.equal(risk.affected_supplier, 'S3');
+  assert.equal(risk.tier, 2);
+  assert.equal(risk.evidence_type, 'declared');
+});
+
+test('ambiguous region-only declarations are not arbitrarily selected', () => {
+  const facts = {
+    is_disruption: true,
+    event: 'Regional disruption',
+    region: 'Zhejiang',
+    supplier_name: null,
+    material_hint: null
+  };
+
+  const declarations = [
+    {
+      declaration_id: 'D1',
+      tier1_supplier: 'S1',
+      upstream_name: 'Zhejiang API Works',
+      upstream_region: 'Zhejiang',
+      material: 'Paracetamol API',
+      status: 'submitted'
+    },
+    {
+      declaration_id: 'D2',
+      tier1_supplier: 'S2',
+      upstream_name: 'Other Chemical Works',
+      upstream_region: 'Zhejiang',
+      material: 'Raw chemical input',
+      status: 'submitted'
+    }
+  ];
+
+  const { risk } = decide(facts, 'News', suppliers, declarations);
+
+  assert.notEqual(risk?.evidence_type, 'declared');
+});
