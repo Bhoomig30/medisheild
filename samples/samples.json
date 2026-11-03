@@ -4,7 +4,7 @@
   "expected":{"tier":2,"affected_supplier":"S3","confidence":"high","evidence_type":"declared"}},
  {"id":"s2","source":"Supplier email (simulated)","text":"From Deccan Pharma Chem: our Paracetamol API shipment is delayed by 10 days due to reactor maintenance.",
   "facts":{"is_disruption":true,"event":"Deccan Pharma Chem shipment delayed 10 days","region":"Hyderabad","supplier_name":"Deccan Pharma Chem","material_hint":"Paracetamol API","delay_days":10},
-  "expected":{"tier":1,"affected_supplier":"S2","confidence":"high","evidence_type":"news"}},
+  "expected":{"tier":1,"affected_supplier":"S2","confidence":"high","evidence_type":"declared"}},
  {"id":"s3","source":"Tariff news (simulated)","text":"China announces export curbs on certain raw chemical inputs from Jiangsu province, effective next month.",
   "facts":{"is_disruption":true,"event":"Export curbs on raw chemical inputs from Jiangsu","region":"Jiangsu","supplier_name":null,"material_hint":"raw chemicals","delay_days":null},
   "expected":{"tier":3,"affected_supplier":"S5","confidence":"medium","evidence_type":"inferred"}},
